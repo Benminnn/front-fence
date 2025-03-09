@@ -30,6 +30,17 @@ const int ENA = 5;  // black
 const int IN4 = 6;  // white
 const int IN3 = 8;  // green
 const int ENB = 9;  // yellow
+const int LIMIT_SWITCH_PIN = 10;  // Limit switch input pin
+
+// Limit switch and calibration settings
+const unsigned long DEBOUNCE_DELAY = 50;    // Debounce time in milliseconds
+const int SAFETY_REVERSE_CYCLES = 2;        // Number of cycles to reverse when limit hit
+const int SAFE_DISTANCE_CYCLES = 3;         // Target distance from physical limit
+unsigned long lastDebounceTime = 0;         // Last time the limit switch was toggled
+int lastLimitSwitchState = HIGH;           // Previous reading from the limit switch
+int limitSwitchState = HIGH;               // Current debounced state
+int calibratedMaxCycles = 0;               // Calibrated number of cycles to physical limit
+bool isCalibrated = false;                 // Whether the system has been calibrated
 
 ///////////////////////////////////////////////////////////////////////
 // Actuator Position tracking
@@ -76,6 +87,7 @@ void setup() {
   pinMode(IN4, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(ENB, OUTPUT);
+  pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
 
   Serial.begin(9600);
   while (!Serial) {};
@@ -288,22 +300,142 @@ void Close_Gates(int Speed) {
   while (A2_POS >= A2_ARC_SPEED) { A2_Backward(A2_SPEED); }
 }
 
-void A1_Forward(int Speed) {
-  if (A1_POS + A1_ARC_SPEED <= A1_MAX_LIMIT) {
-    A1_POS += A1_ARC_SPEED;
-    Motor1_Forward(Speed);
-    delay(OPEN_MSEC);
-    Motor1_Brake();
+bool checkLimitSwitch() {
+  // Read the limit switch with debouncing
+  int reading = digitalRead(LIMIT_SWITCH_PIN);
+  bool limitTriggered = false;
+
+  // If the switch changed, due to noise or pressing
+  if (reading != lastLimitSwitchState) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    // If the reading has been stable longer than the debounce delay
+    if (reading != limitSwitchState) {
+      limitSwitchState = reading;
+      // Limit switch is triggered when the circuit is closed (LOW for normally open switch)
+      if (limitSwitchState == LOW) {
+        limitTriggered = true;
+      }
+    }
+  }
+
+  lastLimitSwitchState = reading;
+  return limitTriggered;
+}
+
+void handleLimitSwitchTrigger() {
+  // Stop immediately
+  Motor1_Brake();
+  Motor2_Brake();
+  Serial.println("[Warning] Limit switch triggered - reversing");
+  
+  // Reverse for safety
+  for (int i = 0; i < SAFETY_REVERSE_CYCLES; i++) {
+    A1_Backward(A1_SPEED);
+    A2_Backward(A2_SPEED);
   }
 }
 
-void A2_Forward(int Speed) {
-  if (A2_POS + A2_ARC_SPEED <= A2_MAX_LIMIT) {
-    A2_POS += A2_ARC_SPEED;
-    Motor2_Forward(Speed);
-    delay(OPEN_MSEC);
-    Motor2_Brake();
+void calibrateGate() {
+  Serial.println("[Info] Starting gate calibration...");
+  int cycleCount = 0;
+  isCalibrated = false;
+  
+  // Reset position
+  while (A1_POS > 0 || A2_POS > 0) {
+    A1_Backward(CALIBRATION_SPEED);
+    A2_Backward(CALIBRATION_SPEED);
   }
+  
+  // Move forward until limit switch is triggered
+  while (!checkLimitSwitch() && cycleCount < 100) { // Safety limit of 100 cycles
+    A1_Forward(CALIBRATION_SPEED);
+    A2_Forward(CALIBRATION_SPEED);
+    cycleCount++;
+  }
+  
+  if (cycleCount >= 100) {
+    Serial.println("[Error] Calibration failed - limit switch not detected");
+    return;
+  }
+  
+  calibratedMaxCycles = cycleCount;
+  isCalibrated = true;
+  
+  // Move back to safe position
+  for (int i = 0; i < SAFETY_REVERSE_CYCLES + SAFE_DISTANCE_CYCLES; i++) {
+    A1_Backward(CALIBRATION_SPEED);
+    A2_Backward(CALIBRATION_SPEED);
+  }
+  
+  Serial.print("[Success] Gate calibrated. Max cycles: ");
+  Serial.println(calibratedMaxCycles);
+}
+
+void A1_Forward(int Speed) {
+  // Check limit switch first
+  if (checkLimitSwitch()) {
+    handleLimitSwitchTrigger();
+    return;
+  }
+  
+  // Check if we're approaching the calibrated limit
+  if (isCalibrated && A1_POS >= (calibratedMaxCycles - SAFE_DISTANCE_CYCLES)) {
+    Serial.println("[Warning] A1 approaching calibrated limit");
+    return;
+  }
+  
+  // Validate position bounds before moving
+  if (A1_POS >= A1_MAX_LIMIT) {
+    Serial.println("[Warning] A1 at maximum limit, cannot move forward");
+    return;
+  }
+  
+  int new_pos = A1_POS + A1_ARC_SPEED;
+  if (new_pos > A1_MAX_LIMIT) {
+    new_pos = A1_MAX_LIMIT;
+  }
+  
+  A1_POS = new_pos;
+  Motor1_Forward(Speed);
+  delay(OPEN_MSEC);
+  Motor1_Brake();
+  Serial.print("[Info] A1 position: ");
+  Serial.println(A1_POS);
+}
+
+void A2_Forward(int Speed) {
+  // Check limit switch first
+  if (checkLimitSwitch()) {
+    handleLimitSwitchTrigger();
+    return;
+  }
+  
+  // Check if we're approaching the calibrated limit
+  if (isCalibrated && A2_POS >= (calibratedMaxCycles - SAFE_DISTANCE_CYCLES)) {
+    Serial.println("[Warning] A2 approaching calibrated limit");
+    return;
+  }
+  
+  // Validate position bounds before moving
+  if (A2_POS >= A2_MAX_LIMIT) {
+    Serial.println("[Warning] A2 at maximum limit, cannot move forward");
+    return;
+  }
+  
+  int new_pos = A2_POS + A2_ARC_SPEED;
+  if (new_pos > A2_MAX_LIMIT) {
+    new_pos = A2_MAX_LIMIT;
+  }
+  
+  A2_POS = new_pos;
+  Motor2_Forward(Speed);
+  delay(OPEN_MSEC);
+  Motor2_Brake();
+  Serial.print("[Info] A2 position: ");
+  Serial.println(A2_POS);
 }
 
 void A1_Backward(int Speed) {
@@ -374,7 +506,16 @@ void initializeActuators() {
   A2_POS = 0;
 
   Serial.println("[Success] Gate initialized to close position");
-  Serial.println("[Action] Opening gates");
-  Open_Gates(150);
-  Serial.println("[Success] Gates open");
+  
+  // Perform initial calibration
+  calibrateGate();
+  
+  // Only open gates if calibration was successful
+  if (isCalibrated) {
+    Serial.println("[Action] Opening gates");
+    Open_Gates(150);
+    Serial.println("[Success] Gates open");
+  } else {
+    Serial.println("[Error] Skipping initial opening due to failed calibration");
+  }
 }
