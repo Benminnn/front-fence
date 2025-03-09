@@ -30,13 +30,22 @@ const int ENA = 5;  // black
 const int IN4 = 6;  // white
 const int IN3 = 8;  // green
 const int ENB = 9;  // yellow
-const int LIMIT_SWITCH_1_PIN = 10;  // Limit switch for gate 1
-const int LIMIT_SWITCH_2_PIN = 11;  // Limit switch for gate 2
+const int LIMIT_SWITCH_1_PIN = 14;  // Limit switch for gate 1
+const int LIMIT_SWITCH_2_PIN = 15;  // Limit switch for gate 2
+const int KEYPAD_PIN = 16;  // Keypad input pin
 
 // Limit switch and calibration settings
 const unsigned long DEBOUNCE_DELAY = 50;    // Debounce time in milliseconds
 const int SAFETY_REVERSE_CYCLES = 2;        // Number of cycles to reverse when limit hit
 const int SAFE_DISTANCE_CYCLES = 3;         // Target distance from physical limit
+
+// Keypad settings
+const unsigned long MIN_KEYPAD_DURATION = 1000;  // Minimum duration (ms) to consider valid keypad input
+unsigned long keypadActivationTime = 0;          // Time when keypad signal was first detected
+bool keypadActive = false;                       // Current keypad state
+int lastKeypadState = LOW;                      // Previous keypad reading
+unsigned long lastKeypadDebounceTime = 0;        // Last time the keypad input changed
+bool gateAccessAuthorized = false;               // Flag for authorized gate access
 
 // Gate 1 limit switch state
 unsigned long lastDebounceTime1 = 0;        // Last time the limit switch 1 was toggled
@@ -99,6 +108,7 @@ void setup() {
   pinMode(ENB, OUTPUT);
   pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
   pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
+  pinMode(KEYPAD_PIN, INPUT);  // Keypad input
 
   Serial.begin(9600);
   while (!Serial) {};
@@ -169,6 +179,9 @@ void loop() {
     }
     lastWifiCheck = currentMillis;
   }
+
+  // Check keypad access
+  checkKeypadAccess();
   
   WiFiClient client = server.available();
   
@@ -585,4 +598,40 @@ void initializeActuators() {
   } else {
     Serial.println("[Error] Skipping initial opening due to failed calibration");
   }
+}
+
+bool checkKeypadAccess() {
+  int reading = digitalRead(KEYPAD_PIN);
+  bool stateChanged = false;
+  unsigned long currentTime = millis();
+
+  // Reset debounce timer if input changed
+  if (reading != lastKeypadState) {
+    lastKeypadDebounceTime = currentTime;
+  }
+
+  // Check if enough time has passed since last change
+  if ((currentTime - lastKeypadDebounceTime) > DEBOUNCE_DELAY) {
+    // Rising edge - keypad just activated
+    if (reading == HIGH && !keypadActive) {
+      keypadActive = true;
+      keypadActivationTime = currentTime;
+      Serial.println("[Info] Keypad signal detected");
+    }
+    // Falling edge - keypad deactivated
+    else if (reading == LOW && keypadActive) {
+      keypadActive = false;
+      // Check if the signal was active for long enough
+      if ((currentTime - keypadActivationTime) >= MIN_KEYPAD_DURATION) {
+        gateAccessAuthorized = true;
+        Serial.println("[Success] Gate access authorized");
+        stateChanged = true;
+      } else {
+        Serial.println("[Warning] Keypad signal too short - access denied");
+      }
+    }
+  }
+
+  lastKeypadState = reading;
+  return stateChanged;
 }
