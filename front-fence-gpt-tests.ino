@@ -3,6 +3,16 @@
 //      Gate Controller Test Suite
 //      Tests for front-fence-gpt.ino
 //
+//      @benhodes
+//      3/9/25
+//      MIT License
+//      All Rights Reserved
+//
+///////////////////////////////////////////////////////////////////////
+
+#include <ArduinoUnit.h>
+#include "front-fence-gpt.ino"
+//
 ///////////////////////////////////////////////////////////////////////
 
 #include <ArduinoUnit.h>
