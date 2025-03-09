@@ -30,50 +30,27 @@ const int ENA = 5;  // black
 const int IN4 = 6;  // white
 const int IN3 = 8;  // green
 const int ENB = 9;  // yellow
-const int LIMIT_SWITCH_PIN = 10;  // Limit switch input pin
+const int LIMIT_SWITCH_1_PIN = 10;  // Limit switch for gate 1
+const int LIMIT_SWITCH_2_PIN = 11;  // Limit switch for gate 2
 
 // Limit switch and calibration settings
 const unsigned long DEBOUNCE_DELAY = 50;    // Debounce time in milliseconds
 const int SAFETY_REVERSE_CYCLES = 2;        // Number of cycles to reverse when limit hit
 const int SAFE_DISTANCE_CYCLES = 3;         // Target distance from physical limit
-unsigned long lastDebounceTime = 0;         // Last time the limit switch was toggled
-int lastLimitSwitchState = HIGH;           // Previous reading from the limit switch
-int limitSwitchState = HIGH;               // Current debounced state
-int calibratedMaxCycles = 0;               // Calibrated number of cycles to physical limit
-bool isCalibrated = false;                 // Whether the system has been calibrated
 
-// Debounce function that can be reused for any digital input
-bool debounceDigitalRead(int pin, int& lastState, unsigned long& lastDebounceTime) {
-  int reading = digitalRead(pin);
-  bool stateChanged = false;
+// Gate 1 limit switch state
+unsigned long lastDebounceTime1 = 0;        // Last time the limit switch 1 was toggled
+int lastLimitSwitch1State = HIGH;          // Previous reading from limit switch 1
+int limitSwitch1State = HIGH;              // Current debounced state
+int calibratedMaxCycles1 = 0;              // Calibrated cycles for gate 1
+bool isCalibrated1 = false;                // Whether gate 1 has been calibrated
 
-  // Reset debounce timer if input changed
-  if (reading != lastState) {
-    lastDebounceTime = millis();
-  }
-
-  // Check if enough time has passed since last change
-  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
-    // Only update if reading is different from current state
-    if (reading != limitSwitchState) {
-      limitSwitchState = reading;
-      stateChanged = true;
-    }
-  }
-
-  lastState = reading;
-  return stateChanged;
-}
-
-bool checkLimitSwitch() {
-  // Use generic debounce function and check if state changed
-  if (debounceDigitalRead(LIMIT_SWITCH_PIN, lastLimitSwitchState, lastDebounceTime)) {
-    // Return true if switch is pressed (LOW for normally open switch)
-    return (limitSwitchState == LOW);
-  }
-  // Return true if switch is already pressed
-  return (limitSwitchState == LOW);
-}
+// Gate 2 limit switch state
+unsigned long lastDebounceTime2 = 0;        // Last time the limit switch 2 was toggled
+int lastLimitSwitch2State = HIGH;          // Previous reading from limit switch 2
+int limitSwitch2State = HIGH;              // Current debounced state
+int calibratedMaxCycles2 = 0;              // Calibrated cycles for gate 2
+bool isCalibrated2 = false;                // Whether gate 2 has been calibrated
 
 ///////////////////////////////////////////////////////////////////////
 // Actuator Position tracking
@@ -120,7 +97,8 @@ void setup() {
   pinMode(IN4, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(ENB, OUTPUT);
-  pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
+  pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
+  pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
 
   Serial.begin(9600);
   while (!Serial) {};
@@ -333,64 +311,142 @@ void Close_Gates(int Speed) {
   while (A2_POS >= A2_ARC_SPEED) { A2_Backward(A2_SPEED); }
 }
 
-void handleLimitSwitchTrigger() {
+bool debounceDigitalRead(int pin, int& lastState, unsigned long& lastDebounceTime) {
+  int reading = digitalRead(pin);
+  bool stateChanged = false;
+
+  // Reset debounce timer if input changed
+  if (reading != lastState) {
+    lastDebounceTime = millis();
+  }
+
+  // Check if enough time has passed since last change
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    // Only update if reading is different from current state
+    if (reading != limitSwitch1State && pin == LIMIT_SWITCH_1_PIN) {
+      limitSwitch1State = reading;
+      stateChanged = true;
+    } else if (reading != limitSwitch2State && pin == LIMIT_SWITCH_2_PIN) {
+      limitSwitch2State = reading;
+      stateChanged = true;
+    }
+  }
+
+  lastState = reading;
+  return stateChanged;
+}
+
+bool checkLimitSwitch1() {
+  if (debounceDigitalRead(LIMIT_SWITCH_1_PIN, lastLimitSwitch1State, lastDebounceTime1)) {
+    return (limitSwitch1State == LOW);
+  }
+  return (limitSwitch1State == LOW);
+}
+
+bool checkLimitSwitch2() {
+  if (debounceDigitalRead(LIMIT_SWITCH_2_PIN, lastLimitSwitch2State, lastDebounceTime2)) {
+    return (limitSwitch2State == LOW);
+  }
+  return (limitSwitch2State == LOW);
+}
+
+void handleLimitSwitchTrigger(int gateNum) {
   // Stop immediately
-  Motor1_Brake();
-  Motor2_Brake();
-  Serial.println("[Warning] Limit switch triggered - reversing");
+  if (gateNum == 1) {
+    Motor1_Brake();
+  } else {
+    Motor2_Brake();
+  }
+  Serial.print("[Warning] Limit switch ");
+  Serial.print(gateNum);
+  Serial.println(" triggered - reversing");
   
   // Reverse for safety
   for (int i = 0; i < SAFETY_REVERSE_CYCLES; i++) {
-    A1_Backward(A1_SPEED);
-    A2_Backward(A2_SPEED);
+    if (gateNum == 1) {
+      A1_Backward(A1_SPEED);
+    } else {
+      A2_Backward(A2_SPEED);
+    }
   }
 }
 
-void calibrateGate() {
-  Serial.println("[Info] Starting gate calibration...");
+void calibrateGate(int gateNum) {
+  Serial.print("[Info] Starting gate ");
+  Serial.print(gateNum);
+  Serial.println(" calibration...");
+  
   int cycleCount = 0;
+  bool& isCalibrated = (gateNum == 1) ? isCalibrated1 : isCalibrated2;
   isCalibrated = false;
   
   // Reset position
-  while (A1_POS > 0 || A2_POS > 0) {
-    A1_Backward(CALIBRATION_SPEED);
-    A2_Backward(CALIBRATION_SPEED);
+  if (gateNum == 1) {
+    while (A1_POS > 0) {
+      A1_Backward(CALIBRATION_SPEED);
+    }
+  } else {
+    while (A2_POS > 0) {
+      A2_Backward(CALIBRATION_SPEED);
+    }
   }
   
   // Move forward until limit switch is triggered
-  while (!checkLimitSwitch() && cycleCount < 100) { // Safety limit of 100 cycles
-    A1_Forward(CALIBRATION_SPEED);
-    A2_Forward(CALIBRATION_SPEED);
-    cycleCount++;
+  bool limitReached = false;
+  while (!limitReached && cycleCount < 100) { // Safety limit of 100 cycles
+    if (gateNum == 1) {
+      limitReached = checkLimitSwitch1();
+      if (!limitReached) {
+        A1_Forward(CALIBRATION_SPEED);
+        cycleCount++;
+      }
+    } else {
+      limitReached = checkLimitSwitch2();
+      if (!limitReached) {
+        A2_Forward(CALIBRATION_SPEED);
+        cycleCount++;
+      }
+    }
   }
   
   if (cycleCount >= 100) {
-    Serial.println("[Error] Calibration failed - limit switch not detected");
+    Serial.print("[Error] Calibration failed for gate ");
+    Serial.print(gateNum);
+    Serial.println(" - limit switch not detected");
     return;
   }
   
-  calibratedMaxCycles = cycleCount;
+  if (gateNum == 1) {
+    calibratedMaxCycles1 = cycleCount;
+  } else {
+    calibratedMaxCycles2 = cycleCount;
+  }
   isCalibrated = true;
   
   // Move back to safe position
   for (int i = 0; i < SAFETY_REVERSE_CYCLES + SAFE_DISTANCE_CYCLES; i++) {
-    A1_Backward(CALIBRATION_SPEED);
-    A2_Backward(CALIBRATION_SPEED);
+    if (gateNum == 1) {
+      A1_Backward(CALIBRATION_SPEED);
+    } else {
+      A2_Backward(CALIBRATION_SPEED);
+    }
   }
   
-  Serial.print("[Success] Gate calibrated. Max cycles: ");
-  Serial.println(calibratedMaxCycles);
+  Serial.print("[Success] Gate ");
+  Serial.print(gateNum);
+  Serial.print(" calibrated. Max cycles: ");
+  Serial.println(gateNum == 1 ? calibratedMaxCycles1 : calibratedMaxCycles2);
 }
 
 void A1_Forward(int Speed) {
   // Check limit switch first
-  if (checkLimitSwitch()) {
-    handleLimitSwitchTrigger();
+  if (checkLimitSwitch1()) {
+    handleLimitSwitchTrigger(1);
     return;
   }
   
   // Check if we're approaching the calibrated limit
-  if (isCalibrated && A1_POS >= (calibratedMaxCycles - SAFE_DISTANCE_CYCLES)) {
+  if (isCalibrated1 && A1_POS >= (calibratedMaxCycles1 - SAFE_DISTANCE_CYCLES)) {
     Serial.println("[Warning] A1 approaching calibrated limit");
     return;
   }
@@ -416,13 +472,13 @@ void A1_Forward(int Speed) {
 
 void A2_Forward(int Speed) {
   // Check limit switch first
-  if (checkLimitSwitch()) {
-    handleLimitSwitchTrigger();
+  if (checkLimitSwitch2()) {
+    handleLimitSwitchTrigger(2);
     return;
   }
   
   // Check if we're approaching the calibrated limit
-  if (isCalibrated && A2_POS >= (calibratedMaxCycles - SAFE_DISTANCE_CYCLES)) {
+  if (isCalibrated2 && A2_POS >= (calibratedMaxCycles2 - SAFE_DISTANCE_CYCLES)) {
     Serial.println("[Warning] A2 approaching calibrated limit");
     return;
   }
@@ -504,6 +560,8 @@ void Motor2_Brake() {
 
 void initializeActuators() {
   Serial.println("Initializing actuators");
+  pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);
+  pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);
 
   for (int i = 0; i <= 17; i++) {
     A1_Backward(0);
@@ -513,13 +571,14 @@ void initializeActuators() {
   A1_POS = 0;
   A2_POS = 0;
 
-  Serial.println("[Success] Gate initialized to close position");
+  Serial.println("[Success] Gates initialized to close position");
   
-  // Perform initial calibration
-  calibrateGate();
+  // Perform initial calibration for both gates
+  calibrateGate(1);
+  calibrateGate(2);
   
-  // Only open gates if calibration was successful
-  if (isCalibrated) {
+  // Only open gates if both calibrations were successful
+  if (isCalibrated1 && isCalibrated2) {
     Serial.println("[Action] Opening gates");
     Open_Gates(150);
     Serial.println("[Success] Gates open");
