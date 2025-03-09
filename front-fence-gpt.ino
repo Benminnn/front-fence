@@ -42,6 +42,39 @@ int limitSwitchState = HIGH;               // Current debounced state
 int calibratedMaxCycles = 0;               // Calibrated number of cycles to physical limit
 bool isCalibrated = false;                 // Whether the system has been calibrated
 
+// Debounce function that can be reused for any digital input
+bool debounceDigitalRead(int pin, int& lastState, unsigned long& lastDebounceTime) {
+  int reading = digitalRead(pin);
+  bool stateChanged = false;
+
+  // Reset debounce timer if input changed
+  if (reading != lastState) {
+    lastDebounceTime = millis();
+  }
+
+  // Check if enough time has passed since last change
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    // Only update if reading is different from current state
+    if (reading != limitSwitchState) {
+      limitSwitchState = reading;
+      stateChanged = true;
+    }
+  }
+
+  lastState = reading;
+  return stateChanged;
+}
+
+bool checkLimitSwitch() {
+  // Use generic debounce function and check if state changed
+  if (debounceDigitalRead(LIMIT_SWITCH_PIN, lastLimitSwitchState, lastDebounceTime)) {
+    // Return true if switch is pressed (LOW for normally open switch)
+    return (limitSwitchState == LOW);
+  }
+  // Return true if switch is already pressed
+  return (limitSwitchState == LOW);
+}
+
 ///////////////////////////////////////////////////////////////////////
 // Actuator Position tracking
 int A1_POS = 0;
@@ -298,31 +331,6 @@ void Open_Gates(int Speed) {
 void Close_Gates(int Speed) {
   while (A1_POS >= A1_ARC_SPEED) { A1_Backward(A1_SPEED); }
   while (A2_POS >= A2_ARC_SPEED) { A2_Backward(A2_SPEED); }
-}
-
-bool checkLimitSwitch() {
-  // Read the limit switch with debouncing
-  int reading = digitalRead(LIMIT_SWITCH_PIN);
-  bool limitTriggered = false;
-
-  // If the switch changed, due to noise or pressing
-  if (reading != lastLimitSwitchState) {
-    lastDebounceTime = millis();
-  }
-
-  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
-    // If the reading has been stable longer than the debounce delay
-    if (reading != limitSwitchState) {
-      limitSwitchState = reading;
-      // Limit switch is triggered when the circuit is closed (LOW for normally open switch)
-      if (limitSwitchState == LOW) {
-        limitTriggered = true;
-      }
-    }
-  }
-
-  lastLimitSwitchState = reading;
-  return limitTriggered;
 }
 
 void handleLimitSwitchTrigger() {
