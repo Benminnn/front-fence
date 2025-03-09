@@ -10,13 +10,16 @@
 ///////////////////////////////////////////////////////////////////////
 
 #include <ESP8266WiFi.h>
+#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
 
 ///////////////////////////////////////////////////////////////////////
 // WiFi Settings
-const char* ssid = "Fort Awesome";   // your network SSID (name)
-const char* pass = "3Py605fa#0V0";   // your network password
 WiFiServer server(80);
-int status = WL_IDLE_STATUS;    // the Wifi radio's status
+WiFiManager wifiManager;
+unsigned long lastWifiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30 seconds
+const unsigned long WIFI_CONNECT_TIMEOUT = 180;   // 3 minute timeout for connections
+const int MAX_WIFI_RETRIES = 3;
 
 ///////////////////////////////////////////////////////////////////////
 // Pin settings
@@ -82,7 +85,18 @@ void setup() {
     while (true);
   }
 
-  WiFiConnect();
+  // Initialize WiFiManager
+  wifiManager.setConfigPortalTimeout(300); // 5 minutes timeout for configuration portal
+  wifiManager.setConnectTimeout(WIFI_CONNECT_TIMEOUT);
+  
+  // Attempt to connect to saved WiFi or start configuration portal
+  if (!wifiManager.autoConnect("GateController-AP")) {
+    Serial.println("Failed to connect and hit timeout");
+    delay(3000);
+    ESP.restart(); // Reset and try again
+  }
+
+  Serial.println("WiFi connected successfully!");
   printWifiStatus();
   initializeActuators();
   server.begin();
@@ -90,31 +104,72 @@ void setup() {
 }
 
 void WiFiConnect() {
-  while (status != WL_CONNECTED) {
-    Serial.print("Attempting to connect to SSID: ");
-    Serial.println(ssid);
-    status = WiFi.begin(ssid, pass);
-    delay(2000);
+  static int retryCount = 0;
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connection lost. Attempting to reconnect...");
+    
+    if (retryCount < MAX_WIFI_RETRIES) {
+      WiFi.disconnect();
+      delay(1000);
+      WiFi.begin(); // Attempt to reconnect with saved credentials
+      
+      unsigned long startAttempt = millis();
+      while (WiFi.status() != WL_CONNECTED && 
+             millis() - startAttempt < WIFI_CONNECT_TIMEOUT * 1000) {
+        delay(500);
+        Serial.print(".");
+      }
+      
+      if (WiFi.status() != WL_CONNECTED) {
+        retryCount++;
+        Serial.println("\nWiFi reconnection attempt failed");
+      } else {
+        retryCount = 0; // Reset counter on successful connection
+        Serial.println("\nWiFi reconnected successfully");
+        printWifiStatus();
+      }
+    } else {
+      Serial.println("Maximum WiFi retry attempts reached. Restarting device...");
+      delay(1000);
+      ESP.restart();
+    }
   }
 }
 
 void loop() {
-  if (status != WL_CONNECTED) { WiFiConnect(); }
+  // Periodic WiFi connection check
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastWifiCheck >= WIFI_CHECK_INTERVAL) {
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFiConnect();
+    }
+    lastWifiCheck = currentMillis;
+  }
+  
   WiFiClient client = server.available();
-
-  delay(50);
-
+  
   if (client) {
+    if (!client.connected()) {
+      Serial.println("Client disconnected");
+      client.stop();
+      return;
+    }
+    
     currentAction = NONE;
     HTTP_req = "";
 
     Serial.println("New request");
     bool currentLineIsBlank = true;
-
-    delay(50);
+    unsigned long timeout = millis();
 
     while (client.connected()) {
-      if (!client) { break; }
+      // Add timeout for stuck connections
+      if (millis() - timeout > 5000) { // 5 second timeout
+        Serial.println("Client connection timeout");
+        break;
+      }
+      
       if (client.available()) {
         char c = client.read();
         HTTP_req += c;
@@ -130,6 +185,8 @@ void loop() {
         } else if (c != '\r') {
           currentLineIsBlank = false;
         }
+        
+        timeout = millis(); // Reset timeout counter on received data
       }
     }
 
