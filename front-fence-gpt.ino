@@ -47,6 +47,9 @@ int lastKeypadState = LOW;                      // Previous keypad reading
 unsigned long lastKeypadDebounceTime = 0;        // Last time the keypad input changed
 bool gateAccessAuthorized = false;               // Flag for authorized gate access
 
+// Gate state tracking
+bool isGateOpen = false;                        // Track if gate is fully open
+
 // Gate 1 limit switch state
 unsigned long lastDebounceTime1 = 0;        // Last time the limit switch 1 was toggled
 int lastLimitSwitch1State = HIGH;          // Previous reading from limit switch 1
@@ -61,10 +64,13 @@ int limitSwitch2State = HIGH;              // Current debounced state
 int calibratedMaxCycles2 = 0;              // Calibrated cycles for gate 2
 bool isCalibrated2 = false;                // Whether gate 2 has been calibrated
 
+// Global state for position initialization
+bool positionInitialized = false;
+
 ///////////////////////////////////////////////////////////////////////
 // Actuator Position tracking
-int A1_POS = 0;
-int A2_POS = 0;
+int A1_POS = -1;  // -1 indicates unknown position
+int A2_POS = -1;
 
 ///////////////////////////////////////////////////////////////////////
 // Calibration values
@@ -180,8 +186,13 @@ void loop() {
     lastWifiCheck = currentMillis;
   }
 
+  if (!positionInitialized) {
+    initializePosition();
+    return;
+  }
+
   // Check keypad access
-  checkKeypadAccess();
+  bool stateChanged = checkKeypadAccess();
   
   WiFiClient client = server.available();
   
@@ -314,14 +325,281 @@ void printWifiStatus() {
   Serial.println(" dBm");
 }
 
+void initializeActuators() {
+  // Set all motor control pins as outputs
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  
+  // Set limit switch pins as inputs with pullup
+  pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);
+  pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);
+  
+  // Initialize positions to unknown
+  A1_POS = -1;  // -1 indicates unknown position
+  A2_POS = -1;
+  positionInitialized = false;
+  isGateOpen = false;  // Assume closed until initialized
+  
+  // Initialize calibration state
+  isCalibrated1 = false;
+  isCalibrated2 = false;
+  
+  Serial.println("[Init] Starting safe position initialization...");
+  initializePosition();
+}
+
+void initializePosition() {
+  if (positionInitialized) {
+    return;
+  }
+  
+  Serial.println("[Init] Finding zero position - moving gates inward...");
+  
+  // Safely move both gates inward until they hit their physical limits
+  // This is safe as the physical gate structure prevents damage when closing
+  while (!checkLimitSwitch1() || !checkLimitSwitch2()) {
+    if (!checkLimitSwitch1()) {
+      A1_Backward(A1_SPEED);
+    } else {
+      Stop_A1();
+    }
+    
+    if (!checkLimitSwitch2()) {
+      A2_Backward(A2_SPEED);
+    } else {
+      Stop_A2();
+    }
+    
+    delay(10);  // Small delay to prevent overwhelming the system
+  }
+  
+  // Both gates have hit their limit switches - we know we're at position 0
+  Stop_A1();
+  Stop_A2();
+  A1_POS = 0;
+  A2_POS = 0;
+  positionInitialized = true;
+  isGateOpen = false;
+  
+  Serial.println("[Init] Zero position found - gates initialized");
+  
+  // Perform initial calibration for both gates
+  calibrateGate(1);
+  calibrateGate(2);
+  
+  // Only open gates if both calibrations were successful
+  if (isCalibrated1 && isCalibrated2) {
+    Serial.println("[Action] Opening gates");
+    gateAccessAuthorized = true;  // Allow initial opening
+    Open_Gates(150);
+    Serial.println("[Success] Gates open");
+  } else {
+    Serial.println("[Error] Skipping initial opening due to failed calibration");
+  }
+}
+
 void Open_Gates(int Speed) {
-  while (A1_POS + A1_ARC_SPEED <= A1_MAX_LIMIT) { A1_Forward(A1_SPEED); }
-  while (A2_POS + A2_ARC_SPEED <= A2_MAX_LIMIT) { A2_Forward(A2_SPEED); }
+  if (!positionInitialized) {
+    Serial.println("[Error] Cannot open gates - position not initialized");
+    return;
+  }
+  
+  if (!gateAccessAuthorized) {
+    Serial.println("[Error] Gate access not authorized - enter keypad code");
+    currentAction = NONE;
+    return;
+  }
+  
+  // Validate positions before moving
+  if (A1_POS >= A1_MAX_LIMIT || A2_POS >= A2_MAX_LIMIT) {
+    Serial.println("[Warning] One or both gates at maximum limit");
+    isGateOpen = true;
+    gateAccessAuthorized = false;
+    currentAction = NONE;
+    return;
+  }
+
+  // Check calibration status
+  if (!isCalibrated1 || !isCalibrated2) {
+    Serial.println("[Error] Gates not calibrated - cannot open");
+    gateAccessAuthorized = false;
+    currentAction = NONE;
+    return;
+  }
+  
+  Serial.println("[Action] Opening gates...");
+  
+  // Open gates completely with position validation and logging
+  while (A1_POS + A1_ARC_SPEED <= A1_MAX_LIMIT) { 
+    // Check limit switch before moving
+    if (checkLimitSwitch1()) {
+      Serial.println("[Warning] Gate 1 limit switch triggered - stopping");
+      break;
+    }
+    
+    // CRITICAL SAFETY CHECK - never exceed calibrated maximum
+    if (A1_POS >= A1_MAX_LIMIT) {
+      Serial.println("[CRITICAL] Gate 1 approaching maximum limit - emergency stop");
+      break;
+    }
+    
+    // Move gate and log position
+    A1_Forward(A1_SPEED);
+    Serial.print("[Info] Gate 1 position: ");
+    Serial.println(A1_POS);
+  }
+  
+  while (A2_POS + A2_ARC_SPEED <= A2_MAX_LIMIT) { 
+    // Check limit switch before moving
+    if (checkLimitSwitch2()) {
+      Serial.println("[Warning] Gate 2 limit switch triggered - stopping");
+      break;
+    }
+    
+    // CRITICAL SAFETY CHECK - never exceed calibrated maximum
+    if (A2_POS >= A2_MAX_LIMIT) {
+      Serial.println("[CRITICAL] Gate 2 approaching maximum limit - emergency stop");
+      break;
+    }
+    
+    // Move gate and log position
+    A2_Forward(A2_SPEED);
+    Serial.print("[Info] Gate 2 position: ");
+    Serial.println(A2_POS);
+  }
+  
+  // Check if gates are fully open
+  if (A1_POS >= A1_MAX_LIMIT && A2_POS >= A2_MAX_LIMIT) {
+    isGateOpen = true;
+    gateAccessAuthorized = false;
+    currentAction = NONE;
+    Serial.println("[Success] Gates fully opened");
+  } else {
+    Serial.print("[Info] Final positions - Gate 1: ");
+    Serial.print(A1_POS);
+    Serial.print(", Gate 2: ");
+    Serial.println(A2_POS);
+  }
 }
 
 void Close_Gates(int Speed) {
-  while (A1_POS >= A1_ARC_SPEED) { A1_Backward(A1_SPEED); }
-  while (A2_POS >= A2_ARC_SPEED) { A2_Backward(A2_SPEED); }
+  if (!positionInitialized) {
+    Serial.println("[Error] Cannot close gates - position not initialized");
+    return;
+  }
+  
+  // Check if already closed
+  if (A1_POS == 0 && A2_POS == 0) {
+    Serial.println("[Info] Gates already closed");
+    isGateOpen = false;
+    gateAccessAuthorized = false;
+    currentAction = NONE;
+    return;
+  }
+
+  Serial.println("[Action] Closing gates...");
+
+  // Close gates completely - safe to go past 0 as physical structure will stop gates
+  while (A1_POS > 0 || !checkLimitSwitch1()) { 
+    A1_Backward(A1_SPEED);
+    Serial.print("[Info] Gate 1 position: ");
+    Serial.println(A1_POS);
+    
+    if (checkLimitSwitch1()) {
+      A1_POS = 0;  // We've hit the physical limit, reset position
+      Stop_A1();
+      break;
+    }
+  }
+  
+  while (A2_POS > 0 || !checkLimitSwitch2()) { 
+    A2_Backward(A2_SPEED);
+    Serial.print("[Info] Gate 2 position: ");
+    Serial.println(A2_POS);
+    
+    if (checkLimitSwitch2()) {
+      A2_POS = 0;  // We've hit the physical limit, reset position
+      Stop_A2();
+      break;
+    }
+  }
+  
+  // Check if gates are fully closed
+  if (checkLimitSwitch1() && checkLimitSwitch2()) {
+    A1_POS = 0;
+    A2_POS = 0;
+    isGateOpen = false;
+    gateAccessAuthorized = false;
+    currentAction = NONE;
+    Serial.println("[Success] Gates fully closed");
+  } else {
+    Serial.print("[Warning] Gates not fully closed - Gate 1: ");
+    Serial.print(A1_POS);
+    Serial.print(", Gate 2: ");
+    Serial.println(A2_POS);
+  }
+}
+
+void checkKeypadAccess() {
+  int reading = digitalRead(KEYPAD_PIN);
+  bool stateChanged = false;
+  unsigned long currentTime = millis();
+
+  // Reset debounce timer if input changed
+  if (reading != lastKeypadState) {
+    lastKeypadDebounceTime = currentTime;
+  }
+
+  // Check if enough time has passed since last change
+  if ((currentTime - lastKeypadDebounceTime) > DEBOUNCE_DELAY) {
+    // Rising edge - keypad just activated
+    if (reading == HIGH && !keypadActive) {
+      keypadActive = true;
+      keypadActivationTime = currentTime;
+      Serial.println("[Info] Keypad signal detected");
+    }
+    // Falling edge - keypad deactivated
+    else if (reading == LOW && keypadActive) {
+      keypadActive = false;
+      // Check if the signal was active for long enough
+      if ((currentTime - keypadActivationTime) >= MIN_KEYPAD_DURATION) {
+        // Don't allow new commands if gates are in motion
+        if (currentAction != NONE && currentAction != HALT) {
+          Serial.println("[Warning] Gates in motion - command ignored");
+          return false;
+        }
+        
+        gateAccessAuthorized = true;
+        Serial.println("[Success] Gate access authorized");
+        
+        // Toggle gate state based on current position
+        if (isGateOpen) {
+          Serial.println("[Action] Closing gates");
+          currentAction = CLOSE;
+        } else {
+          // Verify calibration before opening
+          if (!isCalibrated1 || !isCalibrated2) {
+            Serial.println("[Error] Gates not calibrated - cannot open");
+            gateAccessAuthorized = false;
+            return false;
+          }
+          Serial.println("[Action] Opening gates");
+          currentAction = OPEN;
+        }
+        
+        stateChanged = true;
+      } else {
+        Serial.println("[Warning] Keypad signal too short - access denied");
+      }
+    }
+  }
+
+  lastKeypadState = reading;
+  return stateChanged;
 }
 
 bool debounceDigitalRead(int pin, int& lastState, unsigned long& lastDebounceTime) {
@@ -571,67 +849,10 @@ void Motor2_Brake() {
   digitalWrite(IN4, LOW);
 }
 
-void initializeActuators() {
-  Serial.println("Initializing actuators");
-  pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);
-  pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);
-
-  for (int i = 0; i <= 17; i++) {
-    A1_Backward(0);
-    A2_Backward(0);
-  }
-
-  A1_POS = 0;
-  A2_POS = 0;
-
-  Serial.println("[Success] Gates initialized to close position");
-  
-  // Perform initial calibration for both gates
-  calibrateGate(1);
-  calibrateGate(2);
-  
-  // Only open gates if both calibrations were successful
-  if (isCalibrated1 && isCalibrated2) {
-    Serial.println("[Action] Opening gates");
-    Open_Gates(150);
-    Serial.println("[Success] Gates open");
-  } else {
-    Serial.println("[Error] Skipping initial opening due to failed calibration");
-  }
+void Stop_A1() {
+  Motor1_Brake();
 }
 
-bool checkKeypadAccess() {
-  int reading = digitalRead(KEYPAD_PIN);
-  bool stateChanged = false;
-  unsigned long currentTime = millis();
-
-  // Reset debounce timer if input changed
-  if (reading != lastKeypadState) {
-    lastKeypadDebounceTime = currentTime;
-  }
-
-  // Check if enough time has passed since last change
-  if ((currentTime - lastKeypadDebounceTime) > DEBOUNCE_DELAY) {
-    // Rising edge - keypad just activated
-    if (reading == HIGH && !keypadActive) {
-      keypadActive = true;
-      keypadActivationTime = currentTime;
-      Serial.println("[Info] Keypad signal detected");
-    }
-    // Falling edge - keypad deactivated
-    else if (reading == LOW && keypadActive) {
-      keypadActive = false;
-      // Check if the signal was active for long enough
-      if ((currentTime - keypadActivationTime) >= MIN_KEYPAD_DURATION) {
-        gateAccessAuthorized = true;
-        Serial.println("[Success] Gate access authorized");
-        stateChanged = true;
-      } else {
-        Serial.println("[Warning] Keypad signal too short - access denied");
-      }
-    }
-  }
-
-  lastKeypadState = reading;
-  return stateChanged;
+void Stop_A2() {
+  Motor2_Brake();
 }
