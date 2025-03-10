@@ -11,16 +11,21 @@
 //
 ///////////////////////////////////////////////////////////////////////
 
-#include <ESP8266WiFi.h>
-#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
+#include <WiFiNINA.h>
+
+// Check for config file
+#if __has_include("config.h")
+#include "config.h"
+#else
+#error "Configuration file not found. Please copy config.h.template to config.h and update with your credentials"
+#endif
 
 ///////////////////////////////////////////////////////////////////////
 // WiFi Settings
 WiFiServer server(80);
-WiFiManager wifiManager;
 unsigned long lastWifiCheck = 0;
 const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30 seconds
-const unsigned long WIFI_CONNECT_TIMEOUT = 180;   // 3 minute timeout for connections
+const unsigned long WIFI_CONNECT_TIMEOUT = 180000; // 3 minute timeout for connections
 const int MAX_WIFI_RETRIES = 3;
 
 ///////////////////////////////////////////////////////////////////////
@@ -34,7 +39,24 @@ const int IN3 = 8;  // green
 const int ENB = 9;  // yellow
 const int LIMIT_SWITCH_1_PIN = 14;  // Limit switch for gate 1
 const int LIMIT_SWITCH_2_PIN = 15;  // Limit switch for gate 2
-const int KEYPAD_PIN = 16;  // Keypad input pin
+const int KEYPAD_PIN = 16;  // Keypad input
+
+// Hardware control functions - these can be mocked for testing
+#ifdef ARDUINO_UNIT_MAIN
+extern void testDigitalWrite(pin_size_t pin, PinStatus val);
+extern PinStatus testDigitalRead(pin_size_t pin);
+extern void testAnalogWrite(pin_size_t pin, int value);
+extern void testPinMode(pin_size_t pin, PinMode mode);
+#define hw_digitalWrite testDigitalWrite
+#define hw_digitalRead testDigitalRead
+#define hw_analogWrite testAnalogWrite
+#define hw_pinMode testPinMode
+#else
+#define hw_digitalWrite digitalWrite
+#define hw_digitalRead digitalRead
+#define hw_analogWrite analogWrite
+#define hw_pinMode pinMode
+#endif
 
 // Limit switch and calibration settings
 const unsigned long DEBOUNCE_DELAY = 50;    // Debounce time in milliseconds
@@ -107,78 +129,70 @@ Action currentAction = NONE;
 String HTTP_req = "";
 
 void setup() {
-  pinMode(SSD_WRITE, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(ENA, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(ENB, OUTPUT);
-  pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
-  pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
-  pinMode(KEYPAD_PIN, INPUT);  // Keypad input
+  hw_pinMode(SSD_WRITE, OUTPUT);
+  hw_pinMode(IN1, OUTPUT);
+  hw_pinMode(IN2, OUTPUT);
+  hw_pinMode(ENA, OUTPUT);
+  hw_pinMode(IN4, OUTPUT);
+  hw_pinMode(IN3, OUTPUT);
+  hw_pinMode(ENB, OUTPUT);
+  hw_pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
+  hw_pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
+  hw_pinMode(KEYPAD_PIN, INPUT);  // Keypad input
 
   Serial.begin(9600);
   while (!Serial) {};
 
-  if (WiFi.status() == WL_NO_SHIELD) {
-    Serial.println("WiFi shield not present");
+  #ifdef ARDUINO_UNIT_MAIN
+  // Initialize test mode
+  initializeTests();
+  Serial.println(F("[INFO] Running in test mode"));
+  return;  // Skip normal initialization in test mode
+  #endif
+
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println(F("Communication with WiFi module failed!"));
     while (true);
   }
 
-  // Initialize WiFiManager
-  wifiManager.setConfigPortalTimeout(300); // 5 minutes timeout for configuration portal
-  wifiManager.setConnectTimeout(WIFI_CONNECT_TIMEOUT);
-  
-  // Attempt to connect to saved WiFi or start configuration portal
-  if (!wifiManager.autoConnect("GateController-AP")) {
-    Serial.println("Failed to connect and hit timeout");
-    delay(3000);
-    ESP.restart(); // Reset and try again
+  String fv = WiFi.firmwareVersion();
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println(F("Please upgrade the firmware"));
   }
 
-  Serial.println("WiFi connected successfully!");
-  printWifiStatus();
-  initializeActuators();
-  server.begin();
-  Serial.println("[SUCCESS] Gate service started");
-}
-
-void WiFiConnect() {
-  static int retryCount = 0;
+  // Initialize WiFi connection
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print(F("Connecting to WiFi"));
+  
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < WIFI_CONNECT_TIMEOUT) {
+    delay(500);
+    Serial.print(F("."));
+  }
   
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi connection lost. Attempting to reconnect...");
-    
-    if (retryCount < MAX_WIFI_RETRIES) {
-      WiFi.disconnect();
-      delay(1000);
-      WiFi.begin(); // Attempt to reconnect with saved credentials
-      
-      unsigned long startAttempt = millis();
-      while (WiFi.status() != WL_CONNECTED && 
-             millis() - startAttempt < WIFI_CONNECT_TIMEOUT * 1000) {
-        delay(500);
-        Serial.print(".");
-      }
-      
-      if (WiFi.status() != WL_CONNECTED) {
-        retryCount++;
-        Serial.println("\nWiFi reconnection attempt failed");
-      } else {
-        retryCount = 0; // Reset counter on successful connection
-        Serial.println("\nWiFi reconnected successfully");
-        printWifiStatus();
-      }
-    } else {
-      Serial.println("Maximum WiFi retry attempts reached. Restarting device...");
-      delay(1000);
-      ESP.restart();
-    }
+    Serial.println(F("\nFailed to connect to WiFi. Restarting..."));
+    delay(3000);
+    // On AVR boards, we need to reset manually
+    void(*resetFunc)(void) = 0;
+    resetFunc();
   }
+
+  Serial.println(F("\nWiFi connected successfully!"));
+  printWifiStatus();
+  initializeActuators();
+  
+  server.begin();
+  Serial.println(F("[SUCCESS] Gate service started"));
 }
 
 void loop() {
+  #ifdef ARDUINO_UNIT_MAIN
+  // Run tests in test mode
+  runTests();
+  return;  // Skip normal loop in test mode
+  #endif
+
   // Periodic WiFi connection check
   unsigned long currentMillis = millis();
   if (currentMillis - lastWifiCheck >= WIFI_CHECK_INTERVAL) {
@@ -194,7 +208,7 @@ void loop() {
   }
 
   // Check keypad access
-  bool stateChanged = checkKeypadAccess();
+  checkKeypadAccess();
   
   WiFiClient client = server.available();
   
@@ -329,16 +343,16 @@ void printWifiStatus() {
 
 void initializeActuators() {
   // Set all motor control pins as outputs
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  pinMode(ENA, OUTPUT);
-  pinMode(ENB, OUTPUT);
+  hw_pinMode(IN1, OUTPUT);
+  hw_pinMode(IN2, OUTPUT);
+  hw_pinMode(IN3, OUTPUT);
+  hw_pinMode(IN4, OUTPUT);
+  hw_pinMode(ENA, OUTPUT);
+  hw_pinMode(ENB, OUTPUT);
   
   // Set limit switch pins as inputs with pullup
-  pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);
-  pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);
+  hw_pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);
+  hw_pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);
   
   // Initialize positions to unknown
   A1_POS = -1;  // -1 indicates unknown position
@@ -352,6 +366,42 @@ void initializeActuators() {
   
   Serial.println("[Init] Starting safe position initialization...");
   initializePosition();
+}
+
+void WiFiConnect() {
+  static int retryCount = 0;
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connection lost. Attempting to reconnect...");
+    
+    if (retryCount < MAX_WIFI_RETRIES) {
+      WiFi.disconnect();
+      delay(1000);
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      
+      unsigned long startAttempt = millis();
+      while (WiFi.status() != WL_CONNECTED && 
+             millis() - startAttempt < WIFI_CONNECT_TIMEOUT) {
+        delay(500);
+        Serial.print(".");
+      }
+      
+      if (WiFi.status() != WL_CONNECTED) {
+        retryCount++;
+        Serial.println("\nWiFi reconnection attempt failed");
+      } else {
+        retryCount = 0; // Reset counter on successful connection
+        Serial.println("\nWiFi reconnected successfully");
+        printWifiStatus();
+      }
+    } else {
+      Serial.println("Maximum WiFi retry attempts reached. Restarting device...");
+      delay(1000);
+      // Reset the board
+      void(*resetFunc)(void) = 0;
+      resetFunc();
+    }
+  }
 }
 
 void initializePosition() {
@@ -547,7 +597,7 @@ void Close_Gates(int Speed) {
 }
 
 void checkKeypadAccess() {
-  int reading = digitalRead(KEYPAD_PIN);
+  int reading = hw_digitalRead(KEYPAD_PIN);
   bool stateChanged = false;
   unsigned long currentTime = millis();
 
@@ -572,7 +622,7 @@ void checkKeypadAccess() {
         // Don't allow new commands if gates are in motion
         if (currentAction != NONE && currentAction != HALT) {
           Serial.println("[Warning] Gates in motion - command ignored");
-          return false;
+          return;
         }
         
         gateAccessAuthorized = true;
@@ -587,7 +637,7 @@ void checkKeypadAccess() {
           if (!isCalibrated1 || !isCalibrated2) {
             Serial.println("[Error] Gates not calibrated - cannot open");
             gateAccessAuthorized = false;
-            return false;
+            return;
           }
           Serial.println("[Action] Opening gates");
           currentAction = OPEN;
@@ -601,11 +651,11 @@ void checkKeypadAccess() {
   }
 
   lastKeypadState = reading;
-  return stateChanged;
+  Serial.println("[Info] Keypad signal deactivated");
 }
 
 bool debounceDigitalRead(int pin, int& lastState, unsigned long& lastDebounceTime) {
-  int reading = digitalRead(pin);
+  int reading = hw_digitalRead(pin);
   bool stateChanged = false;
 
   // Reset debounce timer if input changed
@@ -816,39 +866,39 @@ void A2_Backward(int Speed) {
 }
 
 void Motor1_Forward(int Speed) {
-  analogWrite(ENA, Speed);
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
+  hw_digitalWrite(IN1, HIGH);
+  hw_digitalWrite(IN2, LOW);
+  hw_analogWrite(ENA, Speed);
 }
 
 void Motor2_Forward(int Speed) {
-  analogWrite(ENB, Speed);
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
+  hw_digitalWrite(IN3, HIGH);
+  hw_digitalWrite(IN4, LOW);
+  hw_analogWrite(ENB, Speed);
 }
 
 void Motor1_Backward(int Speed) {
-  analogWrite(ENA, Speed);
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
+  hw_digitalWrite(IN1, LOW);
+  hw_digitalWrite(IN2, HIGH);
+  hw_analogWrite(ENA, Speed);
 }
 
 void Motor2_Backward(int Speed) {
-  analogWrite(ENB, Speed);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
+  hw_digitalWrite(IN3, LOW);
+  hw_digitalWrite(IN4, HIGH);
+  hw_analogWrite(ENB, Speed);
 }
 
 void Motor1_Brake() {
-  analogWrite(ENA, LOW);
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
+  hw_digitalWrite(IN1, LOW);
+  hw_digitalWrite(IN2, LOW);
+  hw_analogWrite(ENA, 0);
 }
 
 void Motor2_Brake() {
-  analogWrite(ENB, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
+  hw_digitalWrite(IN3, LOW);
+  hw_digitalWrite(IN4, LOW);
+  hw_analogWrite(ENB, 0);
 }
 
 void Stop_A1() {
