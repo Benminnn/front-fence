@@ -97,35 +97,19 @@ bool useMocks = false;
 // Mock functions with correct types
 void mockDigitalWrite(pin_size_t pin, PinStatus val) {
   mockPinStates[pin] = val;
-  Serial.print(F("[Test] Digital Write - Pin: "));
-  Serial.print(pin);
-  Serial.print(F(" Value: "));
-  Serial.println(val);
 }
 
 PinStatus mockDigitalRead(pin_size_t pin) {
   PinStatus value = (PinStatus)mockPinStates[pin];
-  Serial.print(F("[Test] Digital Read - Pin: "));
-  Serial.print(pin);
-  Serial.print(F(" Value: "));
-  Serial.println(value);
   return value;
 }
 
 void mockAnalogWrite(pin_size_t pin, int value) {
   mockAnalogValues[pin] = value;
-  Serial.print(F("[Test] Analog Write - Pin: "));
-  Serial.print(pin);
-  Serial.print(F(" Value: "));
-  Serial.println(value);
 }
 
 void mockPinMode(pin_size_t pin, PinMode mode) {
   mockPinModes[pin] = mode;
-  Serial.print(F("[Test] Pin Mode - Pin: "));
-  Serial.print(pin);
-  Serial.print(F(" Mode: "));
-  Serial.println(mode == OUTPUT ? F("OUTPUT") : mode == INPUT ? F("INPUT") : F("INPUT_PULLUP"));
 }
 
 // Wrapper functions that switch between mock and real hardware
@@ -187,10 +171,6 @@ void resetTestState() {
 }
 
 void simulateKeypadPress(unsigned long duration) {
-  Serial.print(F("[Test] Simulating keypad press for "));
-  Serial.print(duration);
-  Serial.println(F("ms"));
-  
   mockPinStates[KEYPAD_PIN] = HIGH;
   delay(duration);
   mockPinStates[KEYPAD_PIN] = LOW;
@@ -390,7 +370,6 @@ void test_position_bounds() {
 
 // Test initialization function - called from main setup()
 void initializeTests() {
-  Serial.println(F("[Test] Initializing test suite..."));
   testsPassed = 0;
   testsFailed = 0;
 }
