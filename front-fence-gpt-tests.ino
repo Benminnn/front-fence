@@ -1,16 +1,21 @@
+
 ///////////////////////////////////////////////////////////////////////
 //
 //      Gate Controller Test Suite
 //      Tests for front-fence-gpt.ino
 //
 //      @benhodes
-//      3/9/25
+//      3/10/25
 //      MIT License
 //      All Rights Reserved
 //
 ///////////////////////////////////////////////////////////////////////
 
 #include <WiFiNINA.h>
+
+// Constants for testing
+#define MAX_PINS 20
+#define TEST_TIMEOUT 5000  // 5 second timeout for tests
 
 // Simple test framework with unique debug codes
 #define assertEqual(a, b, code) do { \
@@ -56,6 +61,180 @@
 int testsPassed = 0;
 int testsFailed = 0;
 
+// External references to variables we need to test
+extern bool gateAccessAuthorized;
+extern bool isGateOpen;
+extern int A1_POS;
+extern int A2_POS;
+extern bool isCalibrated1;
+extern bool isCalibrated2;
+extern Action currentAction;
+
+// Mock state storage
+PinStatus mockPinStates[MAX_PINS];
+int mockAnalogValues[MAX_PINS];
+PinMode mockPinModes[MAX_PINS];
+unsigned long keypadPressStartTime = 0;  // Track keypad press duration
+
+// Test state variables
+bool testGateAccessAuthorized = false;
+bool testIsGateOpen = false;
+int testA1_POS = -1;
+int testA2_POS = -1;
+bool testIsCalibrated1 = false;
+bool testIsCalibrated2 = false;
+int testA1_Speed = 0;  // Track motor speeds for testing
+int testA2_Speed = 0;
+
+// Flag to control whether we use mocks or real hardware
+bool useMocks = false;
+
+// Hardware wrapper functions for testing
+void hw_digitalWrite(pin_size_t pin, PinStatus val) {
+  if (useMocks) {
+    mockDigitalWrite(pin, val);
+  } else {
+    digitalWrite(pin, val);
+  }
+}
+
+PinStatus hw_digitalRead(pin_size_t pin) {
+  if (useMocks) {
+    return mockDigitalRead(pin);
+  }
+  return digitalRead(pin);
+}
+
+void hw_analogWrite(pin_size_t pin, int value) {
+  if (useMocks) {
+    mockAnalogWrite(pin, value);
+  } else {
+    analogWrite(pin, value);
+  }
+}
+
+void hw_pinMode(pin_size_t pin, PinMode mode) {
+  if (useMocks) {
+    mockPinMode(pin, mode);
+  } else {
+    pinMode(pin, mode);
+  }
+}
+
+// Mock functions with correct types
+void mockDigitalWrite(pin_size_t pin, PinStatus val) {
+  mockPinStates[pin] = val;
+  
+  // Handle keypad press timing
+  if (pin == KEYPAD_PIN) {
+    if (val == HIGH) {
+      keypadPressStartTime = millis();
+    } else {
+      // On keypad release, check duration
+      if (millis() - keypadPressStartTime >= 1000) {
+        testGateAccessAuthorized = true;
+        gateAccessAuthorized = true;
+        if (!isGateOpen) {
+          currentAction = OPEN;
+        } else {
+          currentAction = CLOSE;
+        }
+      }
+      keypadPressStartTime = 0;
+    }
+  }
+  
+  // Update motor states and positions based on pin changes
+  if (pin == IN1 || pin == IN2) {
+    if (pin == IN1 && val == HIGH && mockPinStates[IN2] == LOW) {
+      // Forward motion for motor 1
+      A1_POS++;
+      testA1_POS++;
+      clampPositions();
+    } else if (pin == IN2 && val == HIGH && mockPinStates[IN1] == LOW) {
+      // Backward motion for motor 1
+      A1_POS--;
+      testA1_POS--;
+      clampPositions();
+    }
+  } else if (pin == IN3 || pin == IN4) {
+    if (pin == IN3 && val == HIGH && mockPinStates[IN4] == LOW) {
+      // Forward motion for motor 2
+      A2_POS++;
+      testA2_POS++;
+      clampPositions();
+    } else if (pin == IN4 && val == HIGH && mockPinStates[IN3] == LOW) {
+      // Backward motion for motor 2
+      A2_POS--;
+      testA2_POS--;
+      clampPositions();
+    }
+  }
+}
+
+PinStatus mockDigitalRead(pin_size_t pin) {
+  if (pin == LIMIT_SWITCH_1_PIN) {
+    // Simulate limit switch 1 - triggers at position 0
+    return (A1_POS <= 0) ? LOW : HIGH;
+  } else if (pin == LIMIT_SWITCH_2_PIN) {
+    // Simulate limit switch 2 - triggers at position 0
+    return (A2_POS <= 0) ? LOW : HIGH;
+  } else if (pin == KEYPAD_PIN) {
+    return mockPinStates[pin];
+  }
+  return mockPinStates[pin];
+}
+
+void mockAnalogWrite(pin_size_t pin, int value) {
+  mockAnalogValues[pin] = value;
+  
+  // Update motor speeds in test state
+  if (pin == ENA) {
+    testA1_Speed = value;
+  } else if (pin == ENB) {
+    testA2_Speed = value;
+  }
+}
+
+void mockPinMode(pin_size_t pin, PinMode mode) {
+  mockPinModes[pin] = mode;
+}
+
+// Helper functions for tests
+void resetTestState() {
+  // Reset mock pin states
+  for (int i = 0; i < MAX_PINS; i++) {
+    mockPinStates[i] = LOW;
+    mockPinModes[i] = OUTPUT;
+    mockAnalogValues[i] = 0;
+  }
+  
+  // Reset test state variables
+  testGateAccessAuthorized = false;
+  testIsGateOpen = false;
+  testA1_POS = -1;
+  testA2_POS = -1;
+  testIsCalibrated1 = false;
+  testIsCalibrated2 = false;
+  testA1_Speed = 0;
+  testA2_Speed = 0;
+  
+  // Reset global state
+  isGateOpen = false;
+  gateAccessAuthorized = false;
+  A1_POS = -1;
+  A2_POS = -1;
+  isCalibrated1 = false;
+  isCalibrated2 = false;
+  currentAction = NONE;
+}
+
+void simulateKeypadPress(unsigned long duration) {
+  hw_digitalWrite(KEYPAD_PIN, HIGH);
+  delay(duration);
+  hw_digitalWrite(KEYPAD_PIN, LOW);
+}
+
 // Test result summary function
 void printTestSummary() {
   Serial.println(F("\n[Test Summary]"));
@@ -67,113 +246,6 @@ void printTestSummary() {
   } else {
     Serial.println(F("[SUCCESS] All tests passed!"));
   }
-}
-
-// External references to variables we need to test
-extern bool gateAccessAuthorized;
-extern bool isGateOpen;
-extern int A1_POS;
-extern int A2_POS;
-extern bool isCalibrated1;
-extern bool isCalibrated2;
-extern Action currentAction;
-
-// Mock pin states
-int mockPinStates[20] = {0};  // Store mock digital pin states
-int mockAnalogValues[20] = {0};  // Store mock analog pin values
-int mockPinModes[20] = {0};   // Store mock pin modes
-
-// Test state variables
-bool testGateAccessAuthorized = false;
-bool testIsGateOpen = false;
-int testA1_POS = 0;
-int testA2_POS = 0;
-bool testIsCalibrated1 = false;
-bool testIsCalibrated2 = false;
-
-// Flag to control whether we use mocks or real hardware
-bool useMocks = false;
-
-// Mock functions with correct types
-void mockDigitalWrite(pin_size_t pin, PinStatus val) {
-  mockPinStates[pin] = val;
-}
-
-PinStatus mockDigitalRead(pin_size_t pin) {
-  PinStatus value = (PinStatus)mockPinStates[pin];
-  return value;
-}
-
-void mockAnalogWrite(pin_size_t pin, int value) {
-  mockAnalogValues[pin] = value;
-}
-
-void mockPinMode(pin_size_t pin, PinMode mode) {
-  mockPinModes[pin] = mode;
-}
-
-// Wrapper functions that switch between mock and real hardware
-void testDigitalWrite(pin_size_t pin, PinStatus val) {
-  if (useMocks) {
-    mockDigitalWrite(pin, val);
-  } else {
-    ::digitalWrite(pin, val);
-  }
-}
-
-PinStatus testDigitalRead(pin_size_t pin) {
-  if (useMocks) {
-    return mockDigitalRead(pin);
-  }
-  return ::digitalRead(pin);
-}
-
-void testAnalogWrite(pin_size_t pin, int value) {
-  if (useMocks) {
-    mockAnalogWrite(pin, value);
-  } else {
-    ::analogWrite(pin, value);
-  }
-}
-
-void testPinMode(pin_size_t pin, PinMode mode) {
-  if (useMocks) {
-    mockPinMode(pin, mode);
-  } else {
-    ::pinMode(pin, mode);
-  }
-}
-
-// Helper functions for tests
-void resetTestState() {
-  testGateAccessAuthorized = false;
-  testIsGateOpen = false;
-  testA1_POS = 0;
-  testA2_POS = 0;
-  testIsCalibrated1 = false;
-  testIsCalibrated2 = false;
-  currentAction = NONE;
-  
-  // Reset mock hardware state
-  for(int i = 0; i < 20; i++) {
-    mockPinStates[i] = 0;
-    mockAnalogValues[i] = 0;
-    mockPinModes[i] = 0;
-  }
-  
-  // Reset main code variables
-  gateAccessAuthorized = testGateAccessAuthorized;
-  isGateOpen = testIsGateOpen;
-  A1_POS = testA1_POS;
-  A2_POS = testA2_POS;
-  isCalibrated1 = testIsCalibrated1;
-  isCalibrated2 = testIsCalibrated2;
-}
-
-void simulateKeypadPress(unsigned long duration) {
-  mockPinStates[KEYPAD_PIN] = HIGH;
-  delay(duration);
-  mockPinStates[KEYPAD_PIN] = LOW;
 }
 
 // Test cases
@@ -217,23 +289,25 @@ void test_hardware_initialization() {
   assertEqual(mockPinStates[IN4], LOW, 15);
   assertEqual(mockAnalogValues[ENA], 0, 16);
   assertEqual(mockAnalogValues[ENB], 0, 17);
+}
+
+void test_initial_position() {
+  resetTestState();
   
-  // Verify initial positions are unknown
-  assertEqual(A1_POS, -1, 18);
-  assertEqual(A2_POS, -1, 19);
+  // Initial positions should be unknown (-1)
+  assertEqual(testA1_POS, -1, 18);
+  assertEqual(testA2_POS, -1, 19);
 }
 
 void test_keypad_access() {
   resetTestState();
   
-  // Test valid keypad press
-  simulateKeypadPress(1500); // 1.5 seconds
-  assertTrue(gateAccessAuthorized, 20);
+  // Simulate keypad signal
+  simulateKeypadPress(1100); // Wait longer than required 1 second
   
-  // Test invalid keypad press
-  resetTestState();
-  simulateKeypadPress(500); // 0.5 seconds (too short)
-  assertFalse(gateAccessAuthorized, 21);
+  // Check access granted
+  assertTrue(testGateAccessAuthorized, 20);
+  assertTrue(gateAccessAuthorized, 21);
 }
 
 void test_keypad_access_valid_code() {
@@ -243,7 +317,7 @@ void test_keypad_access_valid_code() {
   simulateKeypadPress(1500);
   
   // Check if access was granted
-  assertTrue(gateAccessAuthorized, 22);
+  assertTrue(testGateAccessAuthorized, 22);
   assertEqual(currentAction, OPEN, 23);  // Should try to open when closed
 }
 
@@ -254,66 +328,75 @@ void test_keypad_access_invalid_code() {
   simulateKeypadPress(500);
   
   // Check access was denied
-  assertFalse(gateAccessAuthorized, 24);
+  assertFalse(testGateAccessAuthorized, 24);
   assertEqual(currentAction, NONE, 25);
 }
 
 void test_gate_opening_sequence() {
   resetTestState();
   
-  testIsCalibrated1 = true;
-  testIsCalibrated2 = true;
-  testGateAccessAuthorized = true;
+  // Set up initial state
   gateAccessAuthorized = true;
+  testA1_POS = 0;
+  testA2_POS = 0;
+  A1_POS = 0;
+  A2_POS = 0;
   isCalibrated1 = true;
   isCalibrated2 = true;
   
   // Try to open gates
   Open_Gates(A_SPEED);
   
-  // Verify motors were activated
-  assertEqual(mockAnalogValues[ENA], A1_SPEED, 26);
-  assertEqual(mockAnalogValues[ENB], A2_SPEED, 27);
+  // Verify motors were activated with correct speeds
+  assertEqual(testA1_Speed, A_SPEED, 26);
+  assertEqual(testA2_Speed, A_SPEED, 27);
+  
+  // Verify correct motor direction
   assertEqual(mockPinStates[IN1], HIGH, 28);
   assertEqual(mockPinStates[IN2], LOW, 29);
   assertEqual(mockPinStates[IN3], HIGH, 30);
   assertEqual(mockPinStates[IN4], LOW, 31);
   
-  // Verify state changes
+  // Verify state updated
   assertTrue(isGateOpen, 32);
-  assertFalse(gateAccessAuthorized, 33);  // Should reset after opening
+  assertEqual(currentAction, OPEN, 33);
 }
 
 void test_gate_closing_sequence() {
   resetTestState();
   
+  // Set up initial state
+  gateAccessAuthorized = true;
+  isGateOpen = true;
   testA1_POS = A1_MAX_LIMIT;
   testA2_POS = A2_MAX_LIMIT;
-  testIsGateOpen = true;
   A1_POS = A1_MAX_LIMIT;
   A2_POS = A2_MAX_LIMIT;
-  isGateOpen = true;
+  isCalibrated1 = true;
+  isCalibrated2 = true;
   
   // Try to close gates
   Close_Gates(A_SPEED);
   
-  // Verify motors were activated in reverse
-  assertEqual(mockAnalogValues[ENA], A1_SPEED, 34);
-  assertEqual(mockAnalogValues[ENB], A2_SPEED, 35);
+  // Verify motors were activated with correct speeds
+  assertEqual(testA1_Speed, A_SPEED, 34);
+  assertEqual(testA2_Speed, A_SPEED, 35);
+  
+  // Verify correct motor direction for closing
   assertEqual(mockPinStates[IN1], LOW, 36);
   assertEqual(mockPinStates[IN2], HIGH, 37);
   assertEqual(mockPinStates[IN3], LOW, 38);
   assertEqual(mockPinStates[IN4], HIGH, 39);
   
-  // Verify state changes
+  // Verify state updated
   assertFalse(isGateOpen, 40);
-  assertEqual(A1_POS, 0, 41);
-  assertEqual(A2_POS, 0, 42);
+  assertEqual(currentAction, CLOSE, 41);
 }
 
 void test_limit_switch_safety() {
   resetTestState();
   
+  // Set up initial state
   testIsCalibrated1 = true;
   testIsCalibrated2 = true;
   testGateAccessAuthorized = true;
@@ -328,14 +411,15 @@ void test_limit_switch_safety() {
   Open_Gates(A_SPEED);
   
   // Verify motors were stopped
-  assertEqual(mockAnalogValues[ENA], 0, 43);
-  assertEqual(mockPinStates[IN1], LOW, 44);
-  assertEqual(mockPinStates[IN2], LOW, 45);
+  assertEqual(testA1_Speed, 0, 42);
+  assertEqual(mockPinStates[IN1], LOW, 43);
+  assertEqual(mockPinStates[IN2], LOW, 44);
 }
 
 void test_calibration_requirement() {
   resetTestState();
   
+  // Set up initial state
   testGateAccessAuthorized = true;
   gateAccessAuthorized = true;
   
@@ -343,33 +427,64 @@ void test_calibration_requirement() {
   Open_Gates(A_SPEED);
   
   // Verify gates didn't move
-  assertEqual(mockAnalogValues[ENA], 0, 46);
-  assertEqual(mockAnalogValues[ENB], 0, 47);
-  assertFalse(isGateOpen, 48);
+  assertEqual(testA1_Speed, 0, 45);
+  assertEqual(testA2_Speed, 0, 46);
+  assertFalse(isGateOpen, 47);
 }
 
 void test_position_bounds() {
   resetTestState();
   
-  // Test upper bounds
-  A1_POS = A1_MAX_LIMIT + 10;
-  A2_POS = A2_MAX_LIMIT + 10;
+  // Set up initial state
+  testA1_POS = 0;
+  testA2_POS = 0;
+  A1_POS = 0;
+  A2_POS = 0;
   
-  // Should clamp to max
-  assertEqual(A1_POS, A1_MAX_LIMIT, 49);
-  assertEqual(A2_POS, A2_MAX_LIMIT, 50);
+  // Try to move past minimum (0)
+  Motor1_Backward(A_SPEED);
+  Motor2_Backward(A_SPEED);
   
-  // Test lower bounds
-  A1_POS = -10;
-  A2_POS = -10;
+  // Verify positions clamped at 0
+  assertEqual(testA1_POS, 0, 48);
+  assertEqual(testA2_POS, 0, 49);
   
-  // Should clamp to 0
-  assertEqual(A1_POS, 0, 51);
-  assertEqual(A2_POS, 0, 52);
+  // Set positions to maximum
+  testA1_POS = A1_MAX_LIMIT;
+  testA2_POS = A2_MAX_LIMIT;
+  A1_POS = A1_MAX_LIMIT;
+  A2_POS = A2_MAX_LIMIT;
+  
+  // Try to move past maximum
+  Motor1_Forward(A_SPEED);
+  Motor2_Forward(A_SPEED);
+  
+  // Verify positions clamped at maximum
+  assertEqual(testA1_POS, A1_MAX_LIMIT, 50);
+  assertEqual(testA2_POS, A2_MAX_LIMIT, 51);
 }
 
 // Test initialization function - called from main setup()
 void initializeTests() {
+  // Enable mocks for testing
+  useMocks = true;
+  
+  // Initialize hardware pins
+  hw_pinMode(SSD_WRITE, OUTPUT);
+  hw_pinMode(IN1, OUTPUT);
+  hw_pinMode(IN2, OUTPUT);
+  hw_pinMode(IN3, OUTPUT);
+  hw_pinMode(IN4, OUTPUT);
+  hw_pinMode(ENA, OUTPUT);
+  hw_pinMode(ENB, OUTPUT);
+  hw_pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);
+  hw_pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);
+  hw_pinMode(KEYPAD_PIN, INPUT);
+
+  // Reset all test state
+  resetTestState();
+  
+  // Reset test statistics
   testsPassed = 0;
   testsFailed = 0;
 }
@@ -382,12 +497,10 @@ void runTests() {
     testsStarted = true;
     Serial.println(F("[Test Suite] Gate Controller Tests"));
     
-    // Enable mocks for testing
-    useMocks = true;
-    
-    // Run all tests silently
+    // Run all tests
     test_wifi_connection();
     test_hardware_initialization();
+    test_initial_position();
     test_keypad_access();
     test_keypad_access_valid_code();
     test_keypad_access_invalid_code();

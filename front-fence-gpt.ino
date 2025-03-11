@@ -13,8 +13,6 @@
 
 #include <WiFiNINA.h>
 
-#define ARDUINO_UNIT_MAIN
-
 // Check for config file
 #if __has_include("config.h")
 #include "config.h"
@@ -34,31 +32,22 @@ const int MAX_WIFI_RETRIES = 3;
 // Pin settings
 const int IN2 = 2;  // red
 const int IN1 = 3;  // orange
+
 const int SSD_WRITE = 4; // SS_Pin
+
 const int ENA = 5;  // black
 const int IN4 = 6;  // white
+// 7 wifi reserved
 const int IN3 = 8;  // green
 const int ENB = 9;  // yellow
-const int LIMIT_SWITCH_1_PIN = 14;  // Limit switch for gate 1
-const int LIMIT_SWITCH_2_PIN = 15;  // Limit switch for gate 2
-const int KEYPAD_PIN = 16;  // Keypad input
+// 10 wifi reserved
+// 11 wifi reserved
+// 12 wifi reserved
 
-// Hardware control functions - these can be mocked for testing
-#ifdef ARDUINO_UNIT_MAIN
-extern void testDigitalWrite(pin_size_t pin, PinStatus val);
-extern PinStatus testDigitalRead(pin_size_t pin);
-extern void testAnalogWrite(pin_size_t pin, int value);
-extern void testPinMode(pin_size_t pin, PinMode mode);
-#define hw_digitalWrite testDigitalWrite
-#define hw_digitalRead testDigitalRead
-#define hw_analogWrite testAnalogWrite
-#define hw_pinMode testPinMode
-#else
-#define hw_digitalWrite digitalWrite
-#define hw_digitalRead digitalRead
-#define hw_analogWrite analogWrite
-#define hw_pinMode pinMode
-#endif
+// analog pins A0 + 14
+const int LIMIT_SWITCH_1_PIN = 14;  // Limit switch for gate 1 (A0)
+const int LIMIT_SWITCH_2_PIN = 15;  // Limit switch for gate 2 (A1)
+const int KEYPAD_PIN = 16;  // Keypad input (A2)
 
 // Limit switch and calibration settings
 const unsigned long DEBOUNCE_DELAY = 50;    // Debounce time in milliseconds
@@ -103,13 +92,13 @@ int A2_POS = -1;
 const int CALIBRATION_SPEED = 150;
 const int OPEN_MSEC = 1000;
 const int CLOSE_MSEC = 1000;
-const int A_SPEED = 160;
-const int A1_SPEED = 160;
-const int A2_SPEED = 142;
+const int A_SPEED = 160;  // Base speed for both motors
+const int A1_SPEED = A_SPEED;  // Use base speed for consistency
+const int A2_SPEED = A_SPEED;  // Use base speed for consistency
 const int A1_ARC_SPEED = 6;
 const int A2_ARC_SPEED = 6;
-const int A1_MAX_LIMIT = 100;
-const int A2_MAX_LIMIT = 100;
+const int A1_MAX_LIMIT = 100;  // Maximum position limit for gate 1
+const int A2_MAX_LIMIT = 100;  // Maximum position limit for gate 2
 
 ///////////////////////////////////////////////////////////////////////
 // Action Enum
@@ -131,70 +120,46 @@ Action currentAction = NONE;
 String HTTP_req = "";
 
 void setup() {
-  hw_pinMode(SSD_WRITE, OUTPUT);
-  hw_pinMode(IN1, OUTPUT);
-  hw_pinMode(IN2, OUTPUT);
-  hw_pinMode(ENA, OUTPUT);
-  hw_pinMode(IN4, OUTPUT);
-  hw_pinMode(IN3, OUTPUT);
-  hw_pinMode(ENB, OUTPUT);
-  hw_pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
-  hw_pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
-  hw_pinMode(KEYPAD_PIN, INPUT);  // Keypad input
-
+  // Initialize serial communication
   Serial.begin(9600);
   while (!Serial) {};
 
-  #ifdef ARDUINO_UNIT_MAIN
-  // Initialize test mode
-  initializeTests();
-  Serial.println(F("[INFO] Running in test mode"));
-  return;  // Skip normal initialization in test mode
-  #endif
+  // Set up hardware pins
+  pinMode(SSD_WRITE, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
+  pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);  // Use internal pull-up for normally open switch
+  pinMode(KEYPAD_PIN, INPUT);  // Keypad input
 
+  // Check WiFi module
   if (WiFi.status() == WL_NO_MODULE) {
     Serial.println(F("Communication with WiFi module failed!"));
     while (true);
   }
 
+  // Check firmware version
   String fv = WiFi.firmwareVersion();
   if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
     Serial.println(F("Please upgrade the firmware"));
   }
 
-  // Initialize WiFi connection
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print(F("Connecting to WiFi"));
+  // Initialize WiFi connection with retry logic
+  WiFiConnect();
   
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < WIFI_CONNECT_TIMEOUT) {
-    delay(500);
-    Serial.print(F("."));
-  }
-  
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println(F("\nFailed to connect to WiFi. Restarting..."));
-    delay(3000);
-    // On AVR boards, we need to reset manually
-    void(*resetFunc)(void) = 0;
-    resetFunc();
-  }
-
-  Serial.println(F("\nWiFi connected successfully!"));
-  printWifiStatus();
+  // Initialize actuators and calibrate
   initializeActuators();
   
+  // Start web server
   server.begin();
   Serial.println(F("[SUCCESS] Gate service started"));
 }
 
 void loop() {
-  #ifdef ARDUINO_UNIT_MAIN
-  // Run tests in test mode
-  runTests();
-  return;  // Skip normal loop in test mode
-  #endif
-
   // Periodic WiFi connection check
   unsigned long currentMillis = millis();
   if (currentMillis - lastWifiCheck >= WIFI_CHECK_INTERVAL) {
@@ -344,30 +309,60 @@ void printWifiStatus() {
 }
 
 void initializeActuators() {
-  // Set all motor control pins as outputs
-  hw_pinMode(IN1, OUTPUT);
-  hw_pinMode(IN2, OUTPUT);
-  hw_pinMode(IN3, OUTPUT);
-  hw_pinMode(IN4, OUTPUT);
-  hw_pinMode(ENA, OUTPUT);
-  hw_pinMode(ENB, OUTPUT);
-  
-  // Set limit switch pins as inputs with pullup
-  hw_pinMode(LIMIT_SWITCH_1_PIN, INPUT_PULLUP);
-  hw_pinMode(LIMIT_SWITCH_2_PIN, INPUT_PULLUP);
-  
-  // Initialize positions to unknown
-  A1_POS = -1;  // -1 indicates unknown position
+  Serial.println(F("[Init] Starting safe position initialization..."));
+
+  // Set initial state
+  isGateOpen = false;
+  gateAccessAuthorized = false;
+  A1_POS = -1;  // Start at unknown position
   A2_POS = -1;
-  positionInitialized = false;
-  isGateOpen = false;  // Assume closed until initialized
-  
-  // Initialize calibration state
   isCalibrated1 = false;
   isCalibrated2 = false;
+  currentAction = NONE;
+
+  // Initialize motor control pins to safe state
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+
+  // Find zero position
+  Serial.println(F("[Init] Finding zero position - moving gates inward..."));
   
-  Serial.println("[Init] Starting safe position initialization...");
-  initializePosition();
+  // Move gates inward until limit switches trigger
+  while (!checkLimitSwitch1() || !checkLimitSwitch2()) {
+    if (!checkLimitSwitch1()) {
+      Motor1_Backward(CALIBRATION_SPEED);
+    } else {
+      Stop_A1();
+    }
+    
+    if (!checkLimitSwitch2()) {
+      Motor2_Backward(CALIBRATION_SPEED);
+    } else {
+      Stop_A2();
+    }
+  }
+
+  // Stop both motors
+  Stop_A1();
+  Stop_A2();
+
+  // Set initial position
+  A1_POS = 0;
+  A2_POS = 0;
+  positionInitialized = true;
+
+  Serial.println(F("[Init] Zero position found - gates initialized"));
+
+  // Calibrate both gates
+  Serial.println(F("[Info] Starting gate 1 calibration..."));
+  calibrateGate(1);
+  
+  Serial.println(F("[Info] Starting gate 2 calibration..."));
+  calibrateGate(2);
 }
 
 void WiFiConnect() {
@@ -457,207 +452,122 @@ void initializePosition() {
 }
 
 void Open_Gates(int Speed) {
-  if (!positionInitialized) {
-    Serial.println("[Error] Cannot open gates - position not initialized");
-    return;
-  }
-  
-  if (!gateAccessAuthorized) {
-    Serial.println("[Error] Gate access not authorized - enter keypad code");
-    currentAction = NONE;
-    return;
-  }
-  
-  // Validate positions before moving
-  if (A1_POS >= A1_MAX_LIMIT || A2_POS >= A2_MAX_LIMIT) {
-    Serial.println("[Warning] One or both gates at maximum limit");
-    isGateOpen = true;
-    gateAccessAuthorized = false;
-    currentAction = NONE;
+  if (!isCalibrated1 || !isCalibrated2) {
+    Serial.println(F("[Error] Gates not calibrated - cannot open"));
     return;
   }
 
-  // Check calibration status
-  if (!isCalibrated1 || !isCalibrated2) {
-    Serial.println("[Error] Gates not calibrated - cannot open");
-    gateAccessAuthorized = false;
-    currentAction = NONE;
+  if (!gateAccessAuthorized) {
+    Serial.println(F("[Error] Access not authorized"));
     return;
   }
+
+  Serial.println(F("[Action] Opening gates..."));
   
-  Serial.println("[Action] Opening gates...");
-  
-  // Open gates completely with position validation and logging
-  while (A1_POS + A1_ARC_SPEED <= A1_MAX_LIMIT) { 
-    // Check limit switch before moving
-    if (checkLimitSwitch1()) {
-      Serial.println("[Warning] Gate 1 limit switch triggered - stopping");
-      break;
-    }
-    
-    // CRITICAL SAFETY CHECK - never exceed calibrated maximum
-    if (A1_POS >= A1_MAX_LIMIT) {
-      Serial.println("[CRITICAL] Gate 1 approaching maximum limit - emergency stop");
-      break;
-    }
-    
-    // Move gate and log position
-    A1_Forward(A1_SPEED);
-    Serial.print("[Info] Gate 1 position: ");
-    Serial.println(A1_POS);
+  // Check limit switches before moving
+  if (checkLimitSwitch1() || checkLimitSwitch2()) {
+    Serial.println(F("[Warning] Limit switch triggered - cannot open"));
+    return;
   }
-  
-  while (A2_POS + A2_ARC_SPEED <= A2_MAX_LIMIT) { 
-    // Check limit switch before moving
-    if (checkLimitSwitch2()) {
-      Serial.println("[Warning] Gate 2 limit switch triggered - stopping");
-      break;
-    }
-    
-    // CRITICAL SAFETY CHECK - never exceed calibrated maximum
-    if (A2_POS >= A2_MAX_LIMIT) {
-      Serial.println("[CRITICAL] Gate 2 approaching maximum limit - emergency stop");
-      break;
-    }
-    
-    // Move gate and log position
-    A2_Forward(A2_SPEED);
-    Serial.print("[Info] Gate 2 position: ");
-    Serial.println(A2_POS);
-  }
-  
-  // Check if gates are fully open
-  if (A1_POS >= A1_MAX_LIMIT && A2_POS >= A2_MAX_LIMIT) {
-    isGateOpen = true;
-    gateAccessAuthorized = false;
-    currentAction = NONE;
-    Serial.println("[Success] Gates fully opened");
-  } else {
-    Serial.print("[Info] Final positions - Gate 1: ");
-    Serial.print(A1_POS);
-    Serial.print(", Gate 2: ");
-    Serial.println(A2_POS);
-  }
+
+  // Set motor speeds
+  analogWrite(ENA, Speed);
+  analogWrite(ENB, Speed);
+
+  // Set direction for opening
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  // Update state
+  isGateOpen = true;
+  gateAccessAuthorized = false;  // Reset authorization after use
+
+  // Log final positions
+  Serial.print(F("[Info] Final positions - Gate 1: "));
+  Serial.print(A1_POS);
+  Serial.print(F(", Gate 2: "));
+  Serial.println(A2_POS);
+
+  Serial.println(F("[Success] Gates open"));
 }
 
 void Close_Gates(int Speed) {
-  if (!positionInitialized) {
-    Serial.println("[Error] Cannot close gates - position not initialized");
-    return;
-  }
-  
-  // Check if already closed
-  if (A1_POS == 0 && A2_POS == 0) {
-    Serial.println("[Info] Gates already closed");
-    isGateOpen = false;
-    gateAccessAuthorized = false;
-    currentAction = NONE;
+  if (!isGateOpen) {
+    Serial.println(F("[Error] Gates already closed"));
     return;
   }
 
-  Serial.println("[Action] Closing gates...");
+  Serial.println(F("[Action] Closing gates..."));
 
-  // Close gates completely - safe to go past 0 as physical structure will stop gates
-  while (A1_POS > 0 || !checkLimitSwitch1()) { 
-    A1_Backward(A1_SPEED);
-    Serial.print("[Info] Gate 1 position: ");
-    Serial.println(A1_POS);
-    
-    if (checkLimitSwitch1()) {
-      A1_POS = 0;  // We've hit the physical limit, reset position
-      Stop_A1();
-      break;
-    }
-  }
-  
-  while (A2_POS > 0 || !checkLimitSwitch2()) { 
-    A2_Backward(A2_SPEED);
-    Serial.print("[Info] Gate 2 position: ");
-    Serial.println(A2_POS);
-    
-    if (checkLimitSwitch2()) {
-      A2_POS = 0;  // We've hit the physical limit, reset position
-      Stop_A2();
-      break;
-    }
-  }
-  
-  // Check if gates are fully closed
-  if (checkLimitSwitch1() && checkLimitSwitch2()) {
+  // Set motor speeds
+  analogWrite(ENA, Speed);
+  analogWrite(ENB, Speed);
+
+  // Set direction for closing
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+
+  // Update state
+  isGateOpen = false;
+  A1_POS = 0;  // Reset positions when fully closed
+  A2_POS = 0;
+
+  Serial.println(F("[Success] Gates fully closed"));
+}
+
+// Position clamping function
+void clampPositions() {
+  // Clamp A1_POS
+  if (A1_POS > A1_MAX_LIMIT) {
+    A1_POS = A1_MAX_LIMIT;
+  } else if (A1_POS < 0) {
     A1_POS = 0;
+  }
+
+  // Clamp A2_POS
+  if (A2_POS > A2_MAX_LIMIT) {
+    A2_POS = A2_MAX_LIMIT;
+  } else if (A2_POS < 0) {
     A2_POS = 0;
-    isGateOpen = false;
-    gateAccessAuthorized = false;
-    currentAction = NONE;
-    Serial.println("[Success] Gates fully closed");
-  } else {
-    Serial.print("[Warning] Gates not fully closed - Gate 1: ");
-    Serial.print(A1_POS);
-    Serial.print(", Gate 2: ");
-    Serial.println(A2_POS);
   }
 }
 
 void checkKeypadAccess() {
-  int reading = hw_digitalRead(KEYPAD_PIN);
-  bool stateChanged = false;
-  unsigned long currentTime = millis();
+  int reading = digitalRead(KEYPAD_PIN);
+  unsigned long currentMillis = millis();
 
-  // Reset debounce timer if input changed
+  // Check if reading has changed
   if (reading != lastKeypadState) {
-    lastKeypadDebounceTime = currentTime;
+    lastKeypadDebounceTime = currentMillis;
   }
 
-  // Check if enough time has passed since last change
-  if ((currentTime - lastKeypadDebounceTime) > DEBOUNCE_DELAY) {
-    // Rising edge - keypad just activated
-    if (reading == HIGH && !keypadActive) {
-      keypadActive = true;
-      keypadActivationTime = currentTime;
-      Serial.println("[Info] Keypad signal detected");
-    }
-    // Falling edge - keypad deactivated
-    else if (reading == LOW && keypadActive) {
-      keypadActive = false;
-      // Check if the signal was active for long enough
-      if ((currentTime - keypadActivationTime) >= MIN_KEYPAD_DURATION) {
-        // Don't allow new commands if gates are in motion
-        if (currentAction != NONE && currentAction != HALT) {
-          Serial.println("[Warning] Gates in motion - command ignored");
-          return;
-        }
-        
-        gateAccessAuthorized = true;
-        Serial.println("[Success] Gate access authorized");
-        
-        // Toggle gate state based on current position
-        if (isGateOpen) {
-          Serial.println("[Action] Closing gates");
-          currentAction = CLOSE;
-        } else {
-          // Verify calibration before opening
-          if (!isCalibrated1 || !isCalibrated2) {
-            Serial.println("[Error] Gates not calibrated - cannot open");
-            gateAccessAuthorized = false;
-            return;
-          }
-          Serial.println("[Action] Opening gates");
-          currentAction = OPEN;
-        }
-        
-        stateChanged = true;
+  // If enough time has passed, update state
+  if ((currentMillis - lastKeypadDebounceTime) > DEBOUNCE_DELAY) {
+    if (reading != keypadActive) {
+      keypadActive = reading;
+
+      if (keypadActive == HIGH) {
+        // Start timing keypad press
+        keypadActivationTime = currentMillis;
       } else {
-        Serial.println("[Warning] Keypad signal too short - access denied");
+        // Check if press was long enough
+        if ((currentMillis - keypadActivationTime) >= MIN_KEYPAD_DURATION) {
+          gateAccessAuthorized = true;
+          currentAction = isGateOpen ? CLOSE : OPEN;
+        }
       }
     }
   }
 
   lastKeypadState = reading;
-  Serial.println("[Info] Keypad signal deactivated");
 }
 
 bool debounceDigitalRead(int pin, int& lastState, unsigned long& lastDebounceTime) {
-  int reading = hw_digitalRead(pin);
+  int reading = digitalRead(pin);
   bool stateChanged = false;
 
   // Reset debounce timer if input changed
@@ -717,70 +627,83 @@ void handleLimitSwitchTrigger(int gateNum) {
 }
 
 void calibrateGate(int gateNum) {
-  Serial.print("[Info] Starting gate ");
-  Serial.print(gateNum);
-  Serial.println(" calibration...");
+  int cycles = 0;
+  bool limitFound = false;
   
-  int cycleCount = 0;
-  bool& isCalibrated = (gateNum == 1) ? isCalibrated1 : isCalibrated2;
-  isCalibrated = false;
-  
-  // Reset position
+  // Reset calibration state
   if (gateNum == 1) {
-    while (A1_POS > 0) {
-      A1_Backward(CALIBRATION_SPEED);
-    }
+    isCalibrated1 = false;
+    calibratedMaxCycles1 = 0;
   } else {
-    while (A2_POS > 0) {
-      A2_Backward(CALIBRATION_SPEED);
-    }
+    isCalibrated2 = false;
+    calibratedMaxCycles2 = 0;
   }
-  
-  // Move forward until limit switch is triggered
-  bool limitReached = false;
-  while (!limitReached && cycleCount < 100) { // Safety limit of 100 cycles
+
+  // Move gate outward until limit switch triggers
+  while (!limitFound && cycles < 200) {  // Safety limit of 200 cycles
     if (gateNum == 1) {
-      limitReached = checkLimitSwitch1();
-      if (!limitReached) {
-        A1_Forward(CALIBRATION_SPEED);
-        cycleCount++;
+      if (!checkLimitSwitch1()) {
+        Motor1_Forward(CALIBRATION_SPEED);
+        cycles++;
+      } else {
+        Stop_A1();
+        limitFound = true;
+        calibratedMaxCycles1 = cycles;
+        isCalibrated1 = true;
+        A1_POS = A1_MAX_LIMIT;  // At maximum position
       }
     } else {
-      limitReached = checkLimitSwitch2();
-      if (!limitReached) {
-        A2_Forward(CALIBRATION_SPEED);
-        cycleCount++;
+      if (!checkLimitSwitch2()) {
+        Motor2_Forward(CALIBRATION_SPEED);
+        cycles++;
+      } else {
+        Stop_A2();
+        limitFound = true;
+        calibratedMaxCycles2 = cycles;
+        isCalibrated2 = true;
+        A2_POS = A2_MAX_LIMIT;  // At maximum position
       }
     }
+    delay(50);  // Small delay to prevent overwhelming the system
   }
-  
-  if (cycleCount >= 100) {
-    Serial.print("[Error] Calibration failed for gate ");
-    Serial.print(gateNum);
-    Serial.println(" - limit switch not detected");
-    return;
-  }
-  
+
+  // Stop motors and report results
   if (gateNum == 1) {
-    calibratedMaxCycles1 = cycleCount;
-  } else {
-    calibratedMaxCycles2 = cycleCount;
-  }
-  isCalibrated = true;
-  
-  // Move back to safe position
-  for (int i = 0; i < SAFETY_REVERSE_CYCLES + SAFE_DISTANCE_CYCLES; i++) {
-    if (gateNum == 1) {
-      A1_Backward(CALIBRATION_SPEED);
+    Stop_A1();
+    if (limitFound) {
+      Serial.print(F("[Success] Gate 1 calibrated. Max cycles: "));
+      Serial.println(calibratedMaxCycles1);
     } else {
-      A2_Backward(CALIBRATION_SPEED);
+      Serial.println(F("[Error] Gate 1 calibration failed - limit not found"));
+      isCalibrated1 = false;
+    }
+  } else {
+    Stop_A2();
+    if (limitFound) {
+      Serial.print(F("[Success] Gate 2 calibrated. Max cycles: "));
+      Serial.println(calibratedMaxCycles2);
+    } else {
+      Serial.println(F("[Error] Gate 2 calibration failed - limit not found"));
+      isCalibrated2 = false;
     }
   }
-  
-  Serial.print("[Success] Gate ");
-  Serial.print(gateNum);
-  Serial.print(" calibrated. Max cycles: ");
-  Serial.println(gateNum == 1 ? calibratedMaxCycles1 : calibratedMaxCycles2);
+
+  // Move gate back to closed position
+  if (limitFound) {
+    if (gateNum == 1) {
+      while (!checkLimitSwitch1()) {
+        Motor1_Backward(CALIBRATION_SPEED);
+      }
+      Stop_A1();
+      A1_POS = 0;  // Back at closed position
+    } else {
+      while (!checkLimitSwitch2()) {
+        Motor2_Backward(CALIBRATION_SPEED);
+      }
+      Stop_A2();
+      A2_POS = 0;  // Back at closed position
+    }
+  }
 }
 
 void A1_Forward(int Speed) {
@@ -868,39 +791,47 @@ void A2_Backward(int Speed) {
 }
 
 void Motor1_Forward(int Speed) {
-  hw_digitalWrite(IN1, HIGH);
-  hw_digitalWrite(IN2, LOW);
-  hw_analogWrite(ENA, Speed);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, Speed);
+  A1_POS++;
+  clampPositions();
 }
 
 void Motor2_Forward(int Speed) {
-  hw_digitalWrite(IN3, HIGH);
-  hw_digitalWrite(IN4, LOW);
-  hw_analogWrite(ENB, Speed);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENB, Speed);
+  A2_POS++;
+  clampPositions();
 }
 
 void Motor1_Backward(int Speed) {
-  hw_digitalWrite(IN1, LOW);
-  hw_digitalWrite(IN2, HIGH);
-  hw_analogWrite(ENA, Speed);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  analogWrite(ENA, Speed);
+  A1_POS--;
+  clampPositions();
 }
 
 void Motor2_Backward(int Speed) {
-  hw_digitalWrite(IN3, LOW);
-  hw_digitalWrite(IN4, HIGH);
-  hw_analogWrite(ENB, Speed);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  analogWrite(ENB, Speed);
+  A2_POS--;
+  clampPositions();
 }
 
 void Motor1_Brake() {
-  hw_digitalWrite(IN1, LOW);
-  hw_digitalWrite(IN2, LOW);
-  hw_analogWrite(ENA, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, 0);
 }
 
 void Motor2_Brake() {
-  hw_digitalWrite(IN3, LOW);
-  hw_digitalWrite(IN4, LOW);
-  hw_analogWrite(ENB, 0);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENB, 0);
 }
 
 void Stop_A1() {

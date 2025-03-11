@@ -1,0 +1,401 @@
+///////////////////////////////////////////////////////////////////////
+//
+//      Custom Gate Actuator Control Logic       
+//
+//      @benhodes
+//      11/9/22
+//      MIT License
+//      All Rights Reserved
+//
+///////////////////////////////////////////////////////////////////////
+
+#include <WiFiNINA.h>
+
+///////////////////////////////////////////////////////////////////////
+// WiFi Settings
+int keyIndex = 0;  // your network key Index number (needed only for WEP)
+WiFiServer server(80);
+char ssid[] = "Fort Awesome";   //  your network SSID (name)
+char pass[] = "3Py605fa#0V0";   // your network password
+int status = WL_IDLE_STATUS;    // the Wifi radio's status
+
+// WiFi connection management
+unsigned long lastWifiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30 seconds
+const unsigned long WIFI_CONNECT_TIMEOUT = 180000; // 3 minute timeout for connections
+const int MAX_WIFI_RETRIES = 3;
+
+String action = "";
+String HTTP_req = "";
+
+///////////////////////////////////////////////////////////////////////
+// Pin settings
+// Motor 1
+int IN2 = 2;  // red
+int IN1 = 3;  // orange
+int SSD_WRITE = 4; // SS_Pin
+int ENA = 5;  // black
+// Motor 2
+int IN4 = 6;  // white
+// 7 WiFi reserved
+int IN3 = 8;  //green
+int ENB = 9;   // yellow
+// 10-12 WiFi reserved
+
+///////////////////////////////////////////////////////////////////////
+// Actuator Position tracking
+// We carefully track the gate positions, assuming that they start at 0
+int A1_POS = 0;
+int A2_POS = 0;
+
+// motor codes:
+// 0b00: all off
+// 0b01: motor1 only
+// 0b10: motor2 only
+// 0b11: both motor
+int last_active_motors = 0b00;
+
+///////////////////////////////////////////////////////////////////////
+//
+//    Calibration values
+//
+// Calibrated ppd speed for actuators (CALIBRATED 11/9/22)
+//
+// !!! BE VERY CAREFUL CHANGING, CAN EASILY DESTROY FENCE !!!
+//
+int CALIBRATION_SPEED = 150;
+int OPEN_MSEC = 1000; // 1 arc per seccond
+int CLOSE_MSEC = 1000; // 1 arc per seccond 
+int A_SPEED = 160; // Simultanious speed (0-255)
+int A1_SPEED = 160; // Actuator 1 speed (0-255)
+int A2_SPEED = 142; // Actuator 2 speed (0-255)
+int A1_ARC_SPEED = 6; // calibrated to 5.625 deg / arc sec
+int A2_ARC_SPEED = 6; // calibrated to 5.625 deg / arc sec
+int A1_MAX_LIMIT = 100; // runs 16 arcs sec
+int A2_MAX_LIMIT = 100; // runs 16 arcs sec
+// !!!!!!! DO NOT CHANGE PLZ !!!!!!!
+///////////////////////////////////////////////////////////////////////
+
+void setup() {
+  pinMode(SSD_WRITE, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  Serial.begin(9600);
+  while(!Serial){};
+
+  // check for the presence of the shield:
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("WiFi module not present");
+    while (true);
+  }
+
+  // Check firmware version
+  String fv = WiFi.firmwareVersion();
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println("Please upgrade the firmware");
+  }
+  
+  WiFiConnect();
+  // you're connected now, so print out the status:  
+  printWifiStatus();
+  // close the gate (ignoring position limits)
+  // set A1_POS = A2_POS = 0
+  // open the gate  
+  
+  INITIALIZE_ACTUATORS();
+  
+  // start listening for connections
+  server.begin();  
+  Serial.println("[SUCCESS] Gate service started");
+}
+
+void WiFiConnect(){
+  int retryCount = 0;
+  unsigned long startAttemptTime = millis();
+
+  while (status != WL_CONNECTED && retryCount < MAX_WIFI_RETRIES) {
+    Serial.print("Attempting to connect to SSID: ");
+    Serial.println(ssid);
+    status = WiFi.begin(ssid, pass);
+
+    if (status != WL_CONNECTED) {
+      retryCount++;
+      if (millis() - startAttemptTime >= WIFI_CONNECT_TIMEOUT) {
+        Serial.println("Connection attempt timed out");
+        break;
+      }
+      // Exponential backoff between retries
+      delay(1000 * retryCount * retryCount);
+    }
+  }
+
+  if (status == WL_CONNECTED) {
+    Serial.println("Connected to WiFi");
+    lastWifiCheck = millis();
+  } else {
+    Serial.println("Failed to connect after maximum retries");
+  }
+}
+
+void loop() {
+  // Periodic WiFi connection check
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastWifiCheck >= WIFI_CHECK_INTERVAL) {
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFiConnect();
+    }
+    lastWifiCheck = currentMillis;
+  }
+
+  // listen for incoming clients
+  WiFiClient client = server.available();
+
+  delay(50);
+
+  if (client) {
+    action = "";
+    HTTP_req = "";
+
+    Serial.println("New request");
+    // an http request ends with a blank line
+    bool currentLineIsBlank = true;
+
+    delay(50);
+    
+    while (client.connected()) {      
+      if(!client) { break; }
+      if(client.available()) {
+        char c = client.read();
+        //Serial.write(c);
+        HTTP_req += c;  // save the HTTP request 1 char at a time
+
+        // if you've gotten to the end of the line (received a newline
+        // character) and the line is blank, the http request has ended,
+        // so you can send a reply
+        if (c == '\n' && currentLineIsBlank) {
+
+          // TODO: IMPLEMENT motor HANDLERS
+          // if open endpoint is hit, open the gates
+          if (HTTP_req.indexOf("GET / HTTP/1.1") >= 0) {
+            action = "VIEW";
+          } else if (HTTP_req.indexOf("GET /action/open/ HTTP/1.1") >= 0) {
+            action = "OPEN";
+          } else if (HTTP_req.indexOf("GET /action/step_open/ HTTP/1.1") >= 0) {
+            action = "STEP_OPEN";
+          } else if (HTTP_req.indexOf("GET /action/step_close/ HTTP/1.1") >= 0) {
+            action = "STEP_CLOSE";
+          } else if (HTTP_req.indexOf("GET /action/a1_open/ HTTP/1.1") >= 0) {
+            action = "A1_OPEN";
+          } else if (HTTP_req.indexOf("GET /action/a1_close/ HTTP/1.1") >= 0) {
+            action = "A1_CLOSE";
+          } else if (HTTP_req.indexOf("GET /action/a2_open/ HTTP/1.1") >= 0) {
+            action = "A2_OPEN";
+          } else if (HTTP_req.indexOf("GET /action/a2_close/ HTTP/1.1") >= 0) {
+            action = "A2_CLOSE";
+          } else if (HTTP_req.indexOf("GET /action/close/ HTTP/1.1") >= 0) {
+            action = "CLOSE";
+          } else if (HTTP_req.indexOf("GET /action/halt/ HTTP/1.1") >= 0) {
+            action = "HALT";
+          }
+
+          client.println("HTTP/1.1 200 OK");
+          client.println("Content-Type: text/html");
+          client.println("Connection: close");
+          break;
+        }
+
+        if (c == '\n') {
+          // you're starting a new line
+          currentLineIsBlank = true;
+        } else if (c != '\r') {
+          // you've gotten a character on the current line
+          currentLineIsBlank = false;
+        }
+      }
+    }
+
+    // give the web browser time to receive the data
+    delay(10);
+
+    // close the connection:
+    client.stop();
+
+    // A_SPEED magic number
+    if(action == "OPEN") { Open_Gates(A_SPEED); }
+    if(action == "CLOSE") { Close_Gates(A_SPEED); }
+    if(action == "STEP_OPEN") { A1_Forward(A1_SPEED); A2_Forward(A2_SPEED); }
+    if(action == "STEP_CLOSE") { A1_Backward(A1_SPEED); A2_Backward(A2_SPEED); }
+    if(action == "A1_OPEN") { A1_Forward(A1_SPEED); }
+    if(action == "A1_CLOSE") { A1_Backward(A1_SPEED); }
+    if(action == "A2_OPEN") { A2_Forward(A2_SPEED); }
+    if(action == "A2_CLOSE") { A2_Backward(A2_SPEED); }
+
+    Serial.print("[ACTION] Client request served: ");
+    Serial.println(action);
+  }
+
+  delay(10);
+}
+
+void printWifiStatus() {
+  // print the SSID of the network you're attached to:
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+
+  // print your WiFi shield's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
+  // print the received signal strength:
+
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+}
+
+// open both actuators
+void Open_Gates(int Speed) {
+  while(A1_POS + A1_ARC_SPEED <= A1_MAX_LIMIT) { A1_Forward(A1_SPEED); }
+  while(A2_POS + A2_ARC_SPEED <= A2_MAX_LIMIT) { A2_Forward(A2_SPEED); }
+}
+
+// Close both actuators
+void Close_Gates(int Speed) {
+  while(A1_POS >= A1_ARC_SPEED) { A1_Backward(A1_SPEED); }
+  while(A2_POS >= A2_ARC_SPEED) { A2_Backward(A2_SPEED); }
+}
+
+// Move A1 one arc seccond forward
+void A1_Forward(int Speed) {
+  // if we're at the limit, don't move forward
+  if(A1_POS + A1_ARC_SPEED <= A1_MAX_LIMIT) {
+    A1_POS += A1_ARC_SPEED;
+
+    // enable the motor to run
+    Motor1_Forward(Speed);
+    // wait interval
+    delay(OPEN_MSEC);
+    // stop the motor
+    Motor1_Brake();
+  }  
+}
+
+// Move A2 one arc seccond forward
+void A2_Forward(int Speed) {  
+  // if we're at the limit, don't move forward
+  if(A2_POS + A2_ARC_SPEED <= A2_MAX_LIMIT) {
+    A2_POS += A2_ARC_SPEED;
+
+    // enable motor to run
+    Motor2_Forward(Speed);
+    // wait interval
+    delay(OPEN_MSEC);
+    // stop the motor
+    Motor2_Brake();
+  }
+}
+
+// Move A2 one arc seccond backward
+void A1_Backward(int Speed) {
+  // If actuator one is at 0 don't move it, unless the speed is 0 (calibration mode)
+  if(!Speed || A1_POS >= A1_ARC_SPEED){
+    // Update actuator position 1 arc
+    A1_POS -= A1_ARC_SPEED;
+
+    int local_speed = Speed;
+    if(!Speed) { local_speed = CALIBRATION_SPEED; }
+
+    // start the motor
+    Motor1_Backward(local_speed);
+    // wait interval
+    delay(CLOSE_MSEC);
+    // stop the motor
+    Motor1_Brake();
+  }
+}
+
+// Move A2 one arc seccond backward
+void A2_Backward(int Speed) {
+  // If actuator 2 is at 0 don't move it, unless speed is 0 (calibration mode)
+  if(!Speed || A2_POS >= A2_ARC_SPEED){
+    // Update actuator position 1 arc
+    A2_POS -= A2_ARC_SPEED;
+  
+    int local_speed = Speed;
+    if(!Speed) { local_speed = CALIBRATION_SPEED; }
+    
+    // start the motor
+    Motor2_Backward(local_speed);
+    // wait the arc second interval
+    delay(CLOSE_MSEC);
+    // stop the motor
+    Motor2_Brake();
+  }
+}
+
+void Motor1_Forward(int Speed) {
+    analogWrite(ENA, Speed);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    last_active_motors |= 0b01;
+}
+
+void Motor2_Forward(int Speed) {
+    analogWrite(ENB, Speed);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW); 
+    last_active_motors |= 0b10;  
+}
+
+void Motor1_Backward(int Speed) {
+  analogWrite(ENA, Speed);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);  
+  last_active_motors |= 0b01;
+}
+
+void Motor2_Backward(int Speed) {
+  analogWrite(ENB, Speed);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);  
+  last_active_motors |= 0b10;
+}
+
+// stop motor 1
+void Motor1_Brake() {
+  analogWrite(ENA, LOW);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);  
+}
+
+// stop motor 2
+void Motor2_Brake() {
+  analogWrite(ENB, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+
+void INITIALIZE_ACTUATORS() {
+  Serial.println("Initializing actuators");
+
+  for(int i = 0; i <= 17; i++) {
+    // motor speed 0 sets calibration mode
+    A1_Backward(0); 
+    A2_Backward(0);
+  }
+
+  A1_POS = 0;
+  A2_POS = 0;
+
+  Serial.println("[Success] Gate initialized to close position");
+  Serial.println("[Action] Opening gates");
+  Open_Gates(150);
+  Serial.println("[Success] Gates open");
+  
+}
