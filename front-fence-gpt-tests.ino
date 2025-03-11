@@ -12,39 +12,62 @@
 
 #include <WiFiNINA.h>
 
-// Simple test framework
-#define assertEqual(a, b) do { \
+// Simple test framework with unique debug codes
+#define assertEqual(a, b, code) do { \
   if ((a) != (b)) { \
-    Serial.print(F("[FAIL] Expected ")); \
+    Serial.print(F("[FAIL-")); \
+    Serial.print(F("T")); Serial.print(code); \
+    Serial.print(F("] ")); \
+    Serial.print(F(__FILE__)); \
+    Serial.print(F(":")); \
+    Serial.print(__LINE__); \
+    Serial.print(F(" Got: ")); \
     Serial.print(a); \
-    Serial.print(F(" to equal ")); \
+    Serial.print(F(" Expected: ")); \
     Serial.println(b); \
     testsFailed++; \
   } else { \
-    Serial.println(F("[PASS] Assertion passed")); \
     testsPassed++; \
   } \
 } while(0)
 
-#define assertNotEqual(a, b) do { \
+#define assertNotEqual(a, b, code) do { \
   if ((a) == (b)) { \
-    Serial.print(F("[FAIL] Expected ")); \
+    Serial.print(F("[FAIL-")); \
+    Serial.print(F("T")); Serial.print(code); \
+    Serial.print(F("] ")); \
+    Serial.print(F(__FILE__)); \
+    Serial.print(F(":")); \
+    Serial.print(__LINE__); \
+    Serial.print(F(" Got: ")); \
     Serial.print(a); \
-    Serial.print(F(" to not equal ")); \
+    Serial.print(F(" Expected not equal to: ")); \
     Serial.println(b); \
     testsFailed++; \
   } else { \
-    Serial.println(F("[PASS] Assertion passed")); \
     testsPassed++; \
   } \
 } while(0)
 
-#define assertTrue(x) assertEqual((x), true)
-#define assertFalse(x) assertEqual((x), false)
+#define assertTrue(x, code) assertEqual((x), true, code)
+#define assertFalse(x, code) assertEqual((x), false, code)
 
 // Test statistics
 int testsPassed = 0;
 int testsFailed = 0;
+
+// Test result summary function
+void printTestSummary() {
+  Serial.println(F("\n[Test Summary]"));
+  Serial.print(F("Tests Passed: ")); Serial.println(testsPassed);
+  Serial.print(F("Tests Failed: ")); Serial.println(testsFailed);
+  Serial.print(F("Total Tests: ")); Serial.println(testsPassed + testsFailed);
+  if (testsFailed > 0) {
+    Serial.println(F("[WARNING] Some tests failed! Check logs above for [FAIL-T<code>] messages"));
+  } else {
+    Serial.println(F("[SUCCESS] All tests passed!"));
+  }
+}
 
 // External references to variables we need to test
 extern bool gateAccessAuthorized;
@@ -161,8 +184,6 @@ void resetTestState() {
   A2_POS = testA2_POS;
   isCalibrated1 = testIsCalibrated1;
   isCalibrated2 = testIsCalibrated2;
-  
-  Serial.println(F("[Test] Test state reset complete"));
 }
 
 void simulateKeypadPress(unsigned long duration) {
@@ -178,93 +199,87 @@ void simulateKeypadPress(unsigned long duration) {
 // Test cases
 void test_wifi_connection() {
   resetTestState();
-  Serial.println(F("[Test] Running: wifi_connection"));
   
   // Test WiFi status
   int status = WiFi.status();
-  assertNotEqual(status, -1); // Basic check that WiFi module responds
+  assertNotEqual(status, -1, 1);
   
   // Test firmware version exists
   String fv = WiFi.firmwareVersion();
-  assertNotEqual(fv, "");
+  assertNotEqual(fv, "", 2);
 }
 
 void test_hardware_initialization() {
   resetTestState();
-  Serial.println(F("[Test] Running: hardware_initialization"));
   
   // Initialize actuators
   initializeActuators();
   
   // Verify motor control pins are set as outputs
-  assertEqual(mockPinModes[IN1], OUTPUT);
-  assertEqual(mockPinModes[IN2], OUTPUT);
-  assertEqual(mockPinModes[IN3], OUTPUT);
-  assertEqual(mockPinModes[IN4], OUTPUT);
-  assertEqual(mockPinModes[ENA], OUTPUT);
-  assertEqual(mockPinModes[ENB], OUTPUT);
+  assertEqual(mockPinModes[IN1], OUTPUT, 3);
+  assertEqual(mockPinModes[IN2], OUTPUT, 4);
+  assertEqual(mockPinModes[IN3], OUTPUT, 5);
+  assertEqual(mockPinModes[IN4], OUTPUT, 6);
+  assertEqual(mockPinModes[ENA], OUTPUT, 7);
+  assertEqual(mockPinModes[ENB], OUTPUT, 8);
   
   // Verify limit switches are set as input pullup
-  assertEqual(mockPinModes[LIMIT_SWITCH_1_PIN], INPUT_PULLUP);
-  assertEqual(mockPinModes[LIMIT_SWITCH_2_PIN], INPUT_PULLUP);
+  assertEqual(mockPinModes[LIMIT_SWITCH_1_PIN], INPUT_PULLUP, 9);
+  assertEqual(mockPinModes[LIMIT_SWITCH_2_PIN], INPUT_PULLUP, 10);
   
   // Verify keypad pin is set as input
-  assertEqual(mockPinModes[KEYPAD_PIN], INPUT);
+  assertEqual(mockPinModes[KEYPAD_PIN], INPUT, 11);
   
   // Verify initial pin states
-  assertEqual(mockPinStates[IN1], LOW);
-  assertEqual(mockPinStates[IN2], LOW);
-  assertEqual(mockPinStates[IN3], LOW);
-  assertEqual(mockPinStates[IN4], LOW);
-  assertEqual(mockAnalogValues[ENA], 0);
-  assertEqual(mockAnalogValues[ENB], 0);
+  assertEqual(mockPinStates[IN1], LOW, 12);
+  assertEqual(mockPinStates[IN2], LOW, 13);
+  assertEqual(mockPinStates[IN3], LOW, 14);
+  assertEqual(mockPinStates[IN4], LOW, 15);
+  assertEqual(mockAnalogValues[ENA], 0, 16);
+  assertEqual(mockAnalogValues[ENB], 0, 17);
   
   // Verify initial positions are unknown
-  assertEqual(A1_POS, -1);
-  assertEqual(A2_POS, -1);
+  assertEqual(A1_POS, -1, 18);
+  assertEqual(A2_POS, -1, 19);
 }
 
 void test_keypad_access() {
   resetTestState();
-  Serial.println(F("[Test] Running: keypad_access"));
   
   // Test valid keypad press
   simulateKeypadPress(1500); // 1.5 seconds
-  assertTrue(gateAccessAuthorized);
+  assertTrue(gateAccessAuthorized, 20);
   
   // Test invalid keypad press
   resetTestState();
   simulateKeypadPress(500); // 0.5 seconds (too short)
-  assertFalse(gateAccessAuthorized);
+  assertFalse(gateAccessAuthorized, 21);
 }
 
 void test_keypad_access_valid_code() {
   resetTestState();
-  Serial.println(F("[Test] Running: keypad_access_valid_code"));
   
   // Simulate valid keypad press (1.5 seconds)
   simulateKeypadPress(1500);
   
   // Check if access was granted
-  assertTrue(gateAccessAuthorized);
-  assertEqual(currentAction, OPEN);  // Should try to open when closed
+  assertTrue(gateAccessAuthorized, 22);
+  assertEqual(currentAction, OPEN, 23);  // Should try to open when closed
 }
 
 void test_keypad_access_invalid_code() {
   resetTestState();
-  Serial.println(F("[Test] Running: keypad_access_invalid_code"));
   
   // Simulate invalid keypad press (0.5 seconds - too short)
   simulateKeypadPress(500);
   
   // Check access was denied
-  assertFalse(gateAccessAuthorized);
-  assertEqual(currentAction, NONE);
+  assertFalse(gateAccessAuthorized, 24);
+  assertEqual(currentAction, NONE, 25);
 }
 
 void test_gate_opening_sequence() {
   resetTestState();
-  Serial.println(F("[Test] Running: gate_opening_sequence"));
   
   testIsCalibrated1 = true;
   testIsCalibrated2 = true;
@@ -277,21 +292,20 @@ void test_gate_opening_sequence() {
   Open_Gates(A_SPEED);
   
   // Verify motors were activated
-  assertEqual(mockAnalogValues[ENA], A1_SPEED);
-  assertEqual(mockAnalogValues[ENB], A2_SPEED);
-  assertEqual(mockPinStates[IN1], HIGH);
-  assertEqual(mockPinStates[IN2], LOW);
-  assertEqual(mockPinStates[IN3], HIGH);
-  assertEqual(mockPinStates[IN4], LOW);
+  assertEqual(mockAnalogValues[ENA], A1_SPEED, 26);
+  assertEqual(mockAnalogValues[ENB], A2_SPEED, 27);
+  assertEqual(mockPinStates[IN1], HIGH, 28);
+  assertEqual(mockPinStates[IN2], LOW, 29);
+  assertEqual(mockPinStates[IN3], HIGH, 30);
+  assertEqual(mockPinStates[IN4], LOW, 31);
   
   // Verify state changes
-  assertTrue(isGateOpen);
-  assertFalse(gateAccessAuthorized);  // Should reset after opening
+  assertTrue(isGateOpen, 32);
+  assertFalse(gateAccessAuthorized, 33);  // Should reset after opening
 }
 
 void test_gate_closing_sequence() {
   resetTestState();
-  Serial.println(F("[Test] Running: gate_closing_sequence"));
   
   testA1_POS = A1_MAX_LIMIT;
   testA2_POS = A2_MAX_LIMIT;
@@ -304,22 +318,21 @@ void test_gate_closing_sequence() {
   Close_Gates(A_SPEED);
   
   // Verify motors were activated in reverse
-  assertEqual(mockAnalogValues[ENA], A1_SPEED);
-  assertEqual(mockAnalogValues[ENB], A2_SPEED);
-  assertEqual(mockPinStates[IN1], LOW);
-  assertEqual(mockPinStates[IN2], HIGH);
-  assertEqual(mockPinStates[IN3], LOW);
-  assertEqual(mockPinStates[IN4], HIGH);
+  assertEqual(mockAnalogValues[ENA], A1_SPEED, 34);
+  assertEqual(mockAnalogValues[ENB], A2_SPEED, 35);
+  assertEqual(mockPinStates[IN1], LOW, 36);
+  assertEqual(mockPinStates[IN2], HIGH, 37);
+  assertEqual(mockPinStates[IN3], LOW, 38);
+  assertEqual(mockPinStates[IN4], HIGH, 39);
   
   // Verify state changes
-  assertFalse(isGateOpen);
-  assertEqual(A1_POS, 0);
-  assertEqual(A2_POS, 0);
+  assertFalse(isGateOpen, 40);
+  assertEqual(A1_POS, 0, 41);
+  assertEqual(A2_POS, 0, 42);
 }
 
 void test_limit_switch_safety() {
   resetTestState();
-  Serial.println(F("[Test] Running: limit_switch_safety"));
   
   testIsCalibrated1 = true;
   testIsCalibrated2 = true;
@@ -335,14 +348,13 @@ void test_limit_switch_safety() {
   Open_Gates(A_SPEED);
   
   // Verify motors were stopped
-  assertEqual(mockAnalogValues[ENA], 0);
-  assertEqual(mockPinStates[IN1], LOW);
-  assertEqual(mockPinStates[IN2], LOW);
+  assertEqual(mockAnalogValues[ENA], 0, 43);
+  assertEqual(mockPinStates[IN1], LOW, 44);
+  assertEqual(mockPinStates[IN2], LOW, 45);
 }
 
 void test_calibration_requirement() {
   resetTestState();
-  Serial.println(F("[Test] Running: calibration_requirement"));
   
   testGateAccessAuthorized = true;
   gateAccessAuthorized = true;
@@ -351,30 +363,29 @@ void test_calibration_requirement() {
   Open_Gates(A_SPEED);
   
   // Verify gates didn't move
-  assertEqual(mockAnalogValues[ENA], 0);
-  assertEqual(mockAnalogValues[ENB], 0);
-  assertFalse(isGateOpen);
+  assertEqual(mockAnalogValues[ENA], 0, 46);
+  assertEqual(mockAnalogValues[ENB], 0, 47);
+  assertFalse(isGateOpen, 48);
 }
 
 void test_position_bounds() {
   resetTestState();
-  Serial.println(F("[Test] Running: position_bounds"));
   
   // Test upper bounds
   A1_POS = A1_MAX_LIMIT + 10;
   A2_POS = A2_MAX_LIMIT + 10;
   
   // Should clamp to max
-  assertEqual(A1_POS, A1_MAX_LIMIT);
-  assertEqual(A2_POS, A2_MAX_LIMIT);
+  assertEqual(A1_POS, A1_MAX_LIMIT, 49);
+  assertEqual(A2_POS, A2_MAX_LIMIT, 50);
   
   // Test lower bounds
   A1_POS = -10;
   A2_POS = -10;
   
   // Should clamp to 0
-  assertEqual(A1_POS, 0);
-  assertEqual(A2_POS, 0);
+  assertEqual(A1_POS, 0, 51);
+  assertEqual(A2_POS, 0, 52);
 }
 
 // Test initialization function - called from main setup()
@@ -390,12 +401,12 @@ void runTests() {
   
   if (!testsStarted) {
     testsStarted = true;
-    Serial.println(F("[Test] Starting test execution..."));
+    Serial.println(F("[Test Suite] Gate Controller Tests"));
     
     // Enable mocks for testing
     useMocks = true;
     
-    // Run all tests
+    // Run all tests silently
     test_wifi_connection();
     test_hardware_initialization();
     test_keypad_access();
@@ -407,12 +418,8 @@ void runTests() {
     test_calibration_requirement();
     test_position_bounds();
     
-    // Print test results
-    Serial.println(F("\n[Test] Test Results:"));
-    Serial.print(F("Passed: "));
-    Serial.println(testsPassed);
-    Serial.print(F("Failed: "));
-    Serial.println(testsFailed);
+    // Print test summary
+    printTestSummary();
     
     // Disable mocks after tests
     useMocks = false;

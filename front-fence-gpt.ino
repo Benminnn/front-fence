@@ -13,6 +13,8 @@
 
 #include <WiFiNINA.h>
 
+#define ARDUINO_UNIT_MAIN
+
 // Check for config file
 #if __has_include("config.h")
 #include "config.h"
